@@ -48,11 +48,15 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/plugin.c` | `obs_module_load/unload`，注册 source / dock |
+| `src/plugin.c` | `obs_module_load/unload`，注册 source kind、拉起并监控引擎 |
 | `src/source.c` | 注册 *Broadcast Scheduler Control* source kind |
-| `src/source_properties.c` | Qt 属性面板：节目表 CRUD、OBS-WS 配置、控制按钮 |
-| `src/dock.c` | 注册自定义 dock（通过 CEF/本机浏览器 widget 加载 `http://127.0.0.1:8789/admin`） |
+| `src/source_properties.c` | Qt 属性面板：OBS-WS 配置、target_input、scheduler 开关、测试连接、Open Admin 按钮 |
 | `src/engine_proc.c` + `src/platform/*` | 拉起 / 终结 Rust 引擎子进程；Win 用 JobObject，POSIX 用 fork+prctl，macOS 用 posix_spawn |
+
+> **Admin UI 的入口**：OBS 没有公开的纯 C dock API（`obs_register_dock_id` 并不存在），
+> 因此当前版本不做 in-OBS dock，改用属性面板的 *Open Admin* 按钮 + 浏览器打开
+> `http://127.0.0.1:8789/admin`。把 admin 页面嵌入 OBS（C++ + Qt/QWebEngine）
+> 列为未来路线。
 
 ### Rust 引擎 (`engine/`)
 
@@ -94,10 +98,9 @@ engine/src/
 
 1. OBS 启动 → 加载 `tv-obsbroadcast-scheduler(.dll/.so/.dylib)`
 2. `obs_module_load` →
-   - 初始化 sender 模块
    - 注册 *Broadcast Scheduler Control* source kind
-   - 注册 *Broadcast Scheduler Dock*（obs_register_dock_id）
-   - **拉起 Rust 引擎子进程**（包含 JobObject 防止 OBS 崩溃时孤儿）
+   - 拉起 Rust 引擎子进程（包含 JobObject 防止 OBS 崩溃时孤儿）
+   - 启动引擎监控线程（引擎崩溃后自动拉起）
 3. 引擎启动 → 读取本地 `config.json`（凭据 / 节目表）→ 起 axum 服务 :8789
 4. C 端在 source settings 写有 WS 凭据时 → 发 **bootstrap** 通知引擎
 

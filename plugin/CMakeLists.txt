@@ -35,7 +35,6 @@ set(PLUGIN_SOURCES
   src/plugin.c
   src/source.c
   src/source_properties.c
-  src/dock.c
   src/engine_proc.c
   src/tcp_post.c
   src/platform/platform.c

@@ -126,9 +126,6 @@ bool obs_module_load(void)
     /* Register the input source kind. */
     tvbs_source_register();
 
-    /* Register the custom dock. */
-    tvbs_dock_register();
-
     /* Start the monitor thread so a later crash gets a respawn. */
     if (!start_engine_monitor()) {
         blog(LOG_WARNING, TVBS_LOG_TAG "failed to start engine monitor");
@@ -144,7 +141,6 @@ void obs_module_unload(void)
     stop_engine_monitor();
 
     tvbs_source_unregister();
-    tvbs_dock_unregister();
     tvbs_engine_proc_stop(&tvbs_g_state.engine);
     tvbs_g_state.initialized = false;
     tvbs_info("tv-obsbroadcast-scheduler plugin unloaded");
