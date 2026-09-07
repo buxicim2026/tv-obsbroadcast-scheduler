@@ -1,0 +1,33 @@
+# --- Rust / Cargo ---
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed on purpose: this workspace ships a binary crate, so
+# pinning the exact dependency graph keeps CI builds reproducible.
+
+# --- CMake / C plugin build artifacts ---
+/plugin/build/
+/plugin/cmake-build-*/
+/plugin/out/
+/plugin/*.o
+/plugin/*.obj
+/plugin/*.so
+/plugin/*.dll
+/plugin/*.dylib
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- dist/ artifacts (frontend bundles, if any later) ---
+/dist/build/
+
+# --- local config (user-facing JSON for OBS WebSocket credentials) ---
+# The engine writes a `config.json` next to itself on first launch; do not
+# commit it. Users carry it around in their install dir.
+# (Intentionally NOT ignored in CI: see .github/workflows to ensure release
+#  artifacts don't pick it up.)

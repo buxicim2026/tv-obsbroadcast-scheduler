@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920&height=240" />
+    <title>tv-obsbroadcast-scheduler · overlay</title>
+    <!-- Fully offline: system font stack, no CDN. See style.css. -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body class="overlay">
+    <div class="bar">
+        <div class="left">
+            <span class="dot" id="o-dot"></span>
+            <span class="label">ON AIR</span>
+            <span class="name" id="o-name">— 待机 —</span>
+        </div>
+        <div class="right">
+            <span class="next-label">下一档</span>
+            <span class="next-name" id="o-next">—</span>
+            <span class="ticker" id="o-remaining">--:--:--</span>
+        </div>
+    </div>
+
+<script type="module" src="overlay.js"></script>
+</body>
+</html>

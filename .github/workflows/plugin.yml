@@ -1,0 +1,149 @@
+name: Build OBS plugin packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  plugin:
+    name: plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows needs an obs.lib synthesized from a real OBS install (choco +
+    # dumpbin), which is environment-sensitive; mark it experimental so a
+    # failure there doesn't hide Linux / macOS results.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            archive: linux-x64
+            experimental: false
+          - os: windows-2022
+            archive: windows-x64
+            experimental: true
+          - os: macos-13
+            archive: macos-x64
+            experimental: false
+          - os: macos-14
+            archive: macos-arm64
+            experimental: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust engine
+        run: cargo build --release --manifest-path engine/Cargo.toml
+
+      - name: Fetch OBS Studio source (${{ matrix.os }})
+        shell: bash
+        run: |
+          OBS_TAG="30.0.2"
+          git clone --depth 1 --branch ${OBS_TAG} https://github.com/obsproject/obs-studio.git obs-src
+          echo "LIBOBS_INCLUDE_DIR=$(pwd)/obs-src/libobs" >> $GITHUB_ENV
+
+      # MSVC on the runner has no import library for obs.dll, so we build one:
+      # install OBS -> dumpbin /exports -> obs.def -> lib /def -> obs.lib.
+      - name: Set up MSVC dev environment (Windows)
+        if: matrix.os == 'windows-2022'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Generate obs.lib (Windows only)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          choco install obs-studio -y --no-progress
+          $dll = @(
+            "C:\Program Files\obs-studio\bin\64bit\obs.dll",
+            "C:\Program Files (x86)\obs-studio\bin\64bit\obs.dll"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $dll) { throw "obs.dll not found after installing obs-studio" }
+
+          # dumpbin /exports prints rows like:
+          #     1    0 00001234 obs_frontend_add_event_callback
+          $raw = dumpbin /exports "$dll"
+          $names = $raw |
+            Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -eq 0) { throw "no exports parsed from $dll" }
+
+          Set-Content -Encoding Ascii -Path obs.def -Value "EXPORTS"
+          Add-Content -Encoding Ascii -Path obs.def -Value $names
+          lib /def:obs.def /out:obs.lib /machine:x64
+          if (-not (Test-Path obs.lib)) { throw "obs.lib generation failed" }
+          Write-Host "generated obs.lib with $($names.Count) exports"
+
+      - name: Build C plugin
+        shell: bash
+        run: |
+          mkdir -p plugin/build
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            cmake -S plugin -B plugin/build -G "Visual Studio 17 2022" -A x64 \
+              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR" \
+              -DOBS_IMPORT_LIB="$(pwd)/obs.lib"
+          elif [[ "${{ matrix.os }}" == macos-* ]]; then
+            cmake -S plugin -B plugin/build -G "Xcode" \
+              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR"
+          else
+            # Linux: create a stub libobs.so with soname libobs.so.0
+            gcc -shared -Wl,-soname,libobs.so.0 -o libobs.so.0 -nostdlib /dev/null
+            ln -sf libobs.so.0 libobs.so
+            cmake -S plugin -B plugin/build \
+              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR" \
+              -DOBS_STUB_LIB="$(pwd)/libobs.so"
+          fi
+          cmake --build plugin/build --config Release
+
+      - name: Assemble bundle
+        shell: bash
+        run: |
+          OUT="dist/tv-obsbroadcast-scheduler-${{ matrix.archive }}"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/engine" "$OUT/data/locale"
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            cp plugin/build/Release/tv-obsbroadcast-scheduler.dll "$OUT/"
+            cp engine/target/release/tv-obsbroadcast-scheduler.exe "$OUT/engine/"
+            (cd dist && 7z a "${{ matrix.archive }}.zip" "$(basename $OUT)")
+          elif [[ "${{ matrix.os }}" == macos-* ]]; then
+            cp plugin/build/Release/tv-obsbroadcast-scheduler.so "$OUT/" || \
+            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
+            cp engine/target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
+            (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
+          else
+            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
+            cp engine/target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
+            (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
+          fi
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.archive }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    name: publish plugin packages
+    needs: plugin
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: false

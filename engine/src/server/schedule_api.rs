@@ -1,0 +1,142 @@
+//! REST endpoints for the playlist + scheduler state. Read-only endpoints
+//! always use GET. Mutation endpoints (POST /api/playlist/item, etc.) all
+//! require a valid bootstrap_token in the `X-Bootstrap-Token` header.
+//!
+//! The actual scheduler logic (advancing the timeline, switching OBS sources,
+//! inserting bumpers) is filled in by `playlist-interrupt-probe`. This file
+//! only owns the persistence shape so the admin UI can wire up its forms
+//! against a stable contract.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use tvbs_engine::{app_status::AppStatus, AppState};
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertItem {
+    pub id: String,
+    pub name: String,
+    pub file_path: String,
+    pub start_at_ms: i64,
+    pub declared_duration_ms: u64,
+    #[serde(default)]
+    pub detected_duration_ms: Option<u64>,
+    pub kind: crate::config::ProgramKind,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteItem {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnableScheduler {
+    pub enabled: bool,
+}
+
+pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cfg = state.config.read().clone();
+    let st = state.status.read().clone();
+    Json(merge_into_value(&cfg, &st))
+}
+
+pub async fn get_playlist(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cfg = state.config.read();
+    Json(json!({
+        "items": cfg.playlist.items,
+        "bumpers": cfg.playlist.bumpers,
+    }))
+}
+
+pub async fn upsert_item(
+    State(state): State<Arc<AppState>>,
+    Json(item): Json<UpsertItem>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let entry = crate::config::ProgramEntry {
+        id: item.id.clone(),
+        name: item.name,
+        file_path: item.file_path,
+        start_at_ms: item.start_at_ms,
+        declared_duration_ms: item.declared_duration_ms,
+        detected_duration_ms: item.detected_duration_ms,
+        kind: item.kind,
+        notes: item.notes,
+    };
+    {
+        let mut cfg = state.config.write();
+        if let Some(existing) = cfg.playlist.items.iter_mut().find(|p| p.id == entry.id) {
+            *existing = entry.clone();
+        } else {
+            cfg.playlist.items.push(entry.clone());
+        }
+        cfg.playlist
+            .items
+            .sort_by_key(|p| p.start_at_ms);
+    }
+    let _ = state.notify.send(tvbs_engine::NotifyKind::PlaylistChanged);
+    persist(state.config.clone()).await?;
+    Ok(Json(json!({"ok": true, "id": entry.id})))
+}
+
+pub async fn delete_item(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DeleteItem>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    {
+        let mut cfg = state.config.write();
+        cfg.playlist.items.retain(|p| p.id != payload.id);
+        cfg.playlist
+            .bumpers
+            .retain(|b| b.target_program_id != payload.id && b.content.id != payload.id);
+    }
+    let _ = state.notify.send(tvbs_engine::NotifyKind::PlaylistChanged);
+    persist(state.config.clone()).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+pub async fn enable_scheduler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<EnableScheduler>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    {
+        let mut cfg = state.config.write();
+        cfg.scheduler.enabled = payload.enabled;
+    }
+    let _ = state.notify.send(tvbs_engine::NotifyKind::SchedulerStateChanged);
+    persist(state.config.clone()).await?;
+    Ok(Json(json!({"ok": true, "enabled": payload.enabled})))
+}
+
+async fn persist(
+    config: Arc<parking_lot::RwLock<crate::config::Config>>,
+) -> Result<(), (StatusCode, String)> {
+    let cfg_clone = config.read().clone();
+    let path = tvbs_engine::config_path();
+    tokio::task::spawn_blocking(move || cfg_clone.save_atomic(&path))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")))?;
+    Ok(())
+}
+
+fn merge_into_value(cfg: &crate::config::Config, st: &AppStatus) -> Value {
+    let cfg_value = serde_json::to_value(cfg).unwrap_or(Value::Null);
+    let mut out = json!({"status": st});
+    if let Value::Object(map) = cfg_value {
+        if let Value::Object(o) = &mut out {
+            for (k, v) in map {
+                o.insert(k, v);
+            }
+        }
+    }
+    out
+}

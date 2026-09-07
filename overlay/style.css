@@ -1,0 +1,128 @@
+/* ==========================================================================
+   tv-obsbroadcast-scheduler — OBS browser-source overlay.
+
+   SELF-CONTAINED / OFFLINE-FIRST. No CDN and no web fonts: typography uses
+   the OS font stack, so the overlay renders inside OBS on an air-gapped
+   machine and looks native on Windows / macOS / Linux.
+
+   Canvas: 1920 x 240 (matches the recommended browser-source size).
+   ========================================================================== */
+
+:root {
+    --bg:     #0A0E14;
+    --fg:     #E5E7EB;
+    --muted:  #9CA3AF;
+    --red:    #FF3B30;
+    --amber:  #F59E0B;
+    --green:  #10B981;
+
+    /* System stack — zero network cost, native look on every platform. */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+                 Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas",
+                 "Liberation Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    font-family: var(--font-sans);
+    color: var(--fg);
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* The overlay occupies the full canvas but only paints the bottom strip. */
+.overlay {
+    display: flex;
+    align-items: flex-end;
+    justify-content: stretch;
+    height: 100%;
+    width: 100%;
+    background: transparent;
+}
+
+/* ------------------------------ bottom bar ------------------------------- */
+.bar {
+    width: 100%;
+    height: 96px;
+    /* Fade to transparent at the top so it composites over any footage. */
+    background: linear-gradient(180deg,
+                rgba(10, 14, 20, 0) 0%,
+                rgba(10, 14, 20, 0.85) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 80px;
+}
+
+.left, .right {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+}
+
+/* ON AIR lamp */
+.dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--red);
+    box-shadow: 0 0 16px rgba(255, 59, 48, 0.6);
+    animation: blink 1.4s ease-in-out infinite;
+    flex: none;
+}
+/* Greyed out when nothing is on air. */
+.dot.idle {
+    background: var(--muted);
+    box-shadow: none;
+    animation: none;
+}
+
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+}
+
+.label {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--red);
+    letter-spacing: 0.18em;
+}
+
+.name {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------------------------- right-hand group --------------------------- */
+.right .next-label {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+}
+
+.next-name {
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    opacity: 0.85;
+}
+
+/* Millisecond-precision countdown — tabular so digits never jitter. */
+.ticker {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    font-weight: 500;
+    color: var(--green);
+    font-variant-numeric: tabular-nums;
+}

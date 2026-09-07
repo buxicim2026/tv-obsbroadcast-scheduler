@@ -1,0 +1,465 @@
+//! Scheduler — the millisecond-precision engine that drives OBS broadcasts.
+//!
+//! Architecture in one paragraph:
+//!   * A tokio task ticks every 50ms and walks the timeline.
+//!   * At `start_at - lead_in_ms` it issues `SetInputSettings` so the next
+//!     decoder is ready before the cut.
+//!   * At `start_at` it issues `TriggerMediaInputAction::Restart`.
+//!   * Bumpers (interstitials) live in `playlist.bumpers[]`; while in
+//!     `Playing` we watch for a bumper's `at_into_program_ms` window, cut to
+//!     the bumper, then cut back to the primary at the same offset.
+//!
+//! **Single source of truth for the state machine**: `run()` owns a
+//! `SchedulerState` local (`machine`) and passes `&mut` into each tick. The
+//! struct itself is stateless, which is why `Scheduler` is freely shareable
+//! behind an `Arc`. Every transition writes the machine *and* mirrors the
+//! human-readable label into `AppStatus` for the UI.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{TimeZone, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::time::interval;
+use tracing::{debug, info, warn};
+
+use crate::config::{Config, MissingFilePolicy, ProgramEntry};
+use crate::obs_ws::{MediaInputAction, ObsWsClient};
+
+const TICK_MS: u64 = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SchedulerState {
+    /// Not armed. No timeline progression.
+    Idle,
+    /// Will fire `SetInputSettings(target_input, next)` at `fire_at_ms`.
+    Armed {
+        target_id: String,
+        fire_at_ms: i64,
+    },
+    /// Currently driving a program. `started_at_ms` is when this program
+    /// began playing.
+    Playing {
+        program_id: String,
+        started_at_ms: i64,
+    },
+    /// A bumper is on air in the middle of `primary_id`. When it ends we cut
+    /// back to the primary at `return_to_ms` (its offset inside the primary).
+    InterstitialPlaying {
+        primary_id: String,
+        bumper_id: String,
+        return_to_ms: u64,
+    },
+    /// Last error; user must clear before we recover.
+    Error { message: String },
+}
+
+impl SchedulerState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SchedulerState::Idle => "Idle",
+            SchedulerState::Armed { .. } => "Armed",
+            SchedulerState::Playing { .. } => "Playing",
+            SchedulerState::InterstitialPlaying { .. } => "Interstitial",
+            SchedulerState::Error { .. } => "Error",
+        }
+    }
+    pub fn is_active(&self) -> bool {
+        !matches!(self, SchedulerState::Idle | SchedulerState::Error { .. })
+    }
+    pub fn current_program_id(&self) -> Option<&str> {
+        match self {
+            SchedulerState::Playing { program_id, .. } => Some(program_id.as_str()),
+            SchedulerState::Armed { target_id, .. } => Some(target_id.as_str()),
+            SchedulerState::InterstitialPlaying { primary_id, .. } => {
+                Some(primary_id.as_str())
+            }
+            SchedulerState::Idle | SchedulerState::Error { .. } => None,
+        }
+    }
+}
+
+/// Stateless scheduler driver. Holds only the OBS handle + target input name;
+/// the live `SchedulerState` lives in `run()` (see module docs).
+pub struct Scheduler {
+    pub obs: Arc<ObsWsClient>,
+    pub target_input: String,
+}
+
+impl Scheduler {
+    pub fn new(obs: Arc<ObsWsClient>, target_input: String) -> Self {
+        Self { obs, target_input }
+    }
+
+    /// Public entry — called from main.rs once we have an obs-ws handle.
+    /// Keeps ticking forever; relies on caller to drop it on shutdown.
+    pub async fn run(self: Arc<Self>, state: crate::AppState) {
+        info!("scheduler loop starting");
+        // The one and only state machine instance for this run.
+        let mut machine = SchedulerState::Idle;
+
+        let mut tick = interval(Duration::from_millis(TICK_MS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            // Snapshot config so we don't hold the lock across awaits.
+            let (cfg_snapshot, want_running) = {
+                let cfg = state.config.read();
+                (
+                    cfg.clone(),
+                    cfg.scheduler.enabled
+                        && matches!(state.status.read().obs_connected, true),
+                )
+            };
+            if !want_running {
+                if machine.is_active() {
+                    self.become_idle(&state, &mut machine);
+                }
+                continue;
+            }
+
+            // Run a single tick under a deterministic state evolution.
+            self.tick_once(&state, &cfg_snapshot, &mut machine).await;
+        }
+    }
+
+    async fn tick_once(
+        &self,
+        state: &crate::AppState,
+        cfg: &Config,
+        machine: &mut SchedulerState,
+    ) {
+        let now_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
+
+        match machine {
+            SchedulerState::Idle => {
+                // Find the next program; if we're inside one already (rare
+                // path: state was reset by a crash but the file is on air),
+                // jump into Playing immediately.
+                if let Some(p) = crate::playlist::current_program(cfg, now_ms) {
+                    self.begin_playing(state, cfg, p, now_ms, machine).await;
+                } else if let Some(next) = crate::playlist::next_program(cfg, now_ms) {
+                    let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
+                    self.transition_to_armed(state, next, fire_at, machine);
+                }
+            }
+            SchedulerState::Armed { target_id, fire_at_ms } => {
+                let target_id = target_id.clone();
+                let fire_at = *fire_at_ms;
+                if let Some(p) = cfg.playlist.items.iter().find(|p| p.id == target_id) {
+                    if now_ms >= fire_at {
+                        // Issue SetInputSettings NOW so OBS has the decoder
+                        // warm by the time we RESTART.
+                        if let Err(e) = self.preload(p).await {
+                            self.transition_to_error(state, &format!("preload: {e}"), machine);
+                            return;
+                        }
+                    }
+                    if now_ms >= p.start_at_ms {
+                        if let Err(e) = self.cut_to(p).await {
+                            self.transition_to_error(state, &format!("cut: {e}"), machine);
+                            return;
+                        }
+                        self.begin_playing(state, cfg, p, now_ms, machine).await;
+                    }
+                } else {
+                    // Target disappeared (playlist mutated); revert to Idle.
+                    self.become_idle(state, machine);
+                }
+            }
+            SchedulerState::Playing { program_id, started_at_ms } => {
+                let program_id = program_id.clone();
+                let started = *started_at_ms;
+
+                let Some(p) = cfg.playlist.items.iter().find(|p| p.id == program_id) else {
+                    // Program was deleted from the playlist while on air. Hold.
+                    warn!("current program id={} no longer exists; holding", program_id);
+                    return;
+                };
+
+                let elapsed = now_ms - started;
+                let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
+                let into_program_ms = (now_ms - p.start_at_ms).max(0);
+                let lead_in = cfg.scheduler.lead_in_ms;
+
+                // ---- Bumper detection -------------------------------------
+                if crate::interrupt::ready_to_fire(
+                    &cfg.playlist.bumpers, p, into_program_ms, lead_in,
+                ) {
+                    if let Some(b) = cfg
+                        .playlist
+                        .bumpers
+                        .iter()
+                        .find(|b| b.target_program_id == p.id)
+                    {
+                        if let Some(content) = crate::interrupt::pick_bumper_content(b) {
+                            info!(
+                                "firing bumper {} at +{}ms into {}",
+                                content.name, into_program_ms, p.name
+                            );
+                            match crate::interrupt::trigger_bumper(
+                                &self.obs,
+                                &self.target_input,
+                                b,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    let return_to = crate::interrupt::return_to_ms(b);
+                                    self.transition_to_interstitial(
+                                        state,
+                                        &p.id,
+                                        &b.id,
+                                        return_to,
+                                        &content.name,
+                                        machine,
+                                    );
+                                    return;
+                                }
+                                Err(e) => warn!("bumper fire failed: {e}"),
+                            }
+                        }
+                    }
+                }
+
+                if elapsed < 0 {
+                    // Clock went backwards (NTP step / user offset). Stay put.
+                    warn!("clock skew negative on Playing; holding program {}", p.name);
+                } else if now_ms >= end {
+                    // Find next program.
+                    match crate::playlist::next_program(cfg, now_ms) {
+                        Some(next) => {
+                            self.preload_if_soon(next, cfg, now_ms);
+                            let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
+                            self.transition_to_armed(state, next, fire_at, machine);
+                        }
+                        None => {
+                            // Schedule ended; loop in Idle until user re-arms.
+                            info!("schedule exhausted past {}", p.name);
+                            self.become_idle(state, machine);
+                        }
+                    }
+                } else {
+                    self.refresh_remaining(state, p, end - now_ms);
+                }
+            }
+            SchedulerState::InterstitialPlaying { primary_id, bumper_id, return_to_ms } => {
+                let primary_id = primary_id.clone();
+                let bumper_id = bumper_id.clone();
+                let _return_to = *return_to_ms;
+
+                let (Some(p), Some(b)) = (
+                    cfg.playlist.items.iter().find(|p| p.id == primary_id),
+                    cfg.playlist.bumpers.iter().find(|b| b.id == bumper_id),
+                ) else {
+                    // Bumper or primary vanished from the playlist; bail to Idle.
+                    self.become_idle(state, machine);
+                    return;
+                };
+
+                let bumper_dur = b.content.declared_duration_ms as i64;
+                let bumper_start_ms = p.start_at_ms + b.at_into_program_ms as i64;
+                let bumper_end_ms = bumper_start_ms + bumper_dur;
+
+                if now_ms >= bumper_end_ms {
+                    if let Err(e) = crate::interrupt::trigger_resume_primary(
+                        &self.obs,
+                        &self.target_input,
+                        p,
+                    )
+                    .await
+                    {
+                        warn!("resume primary failed: {e}");
+                    }
+                    // The bumper replaced the tail of the primary starting at
+                    // `at_into_program_ms`; resuming there means the primary
+                    // has (declared - at_into_program_ms) left to play.
+                    let primary_remaining = crate::interrupt::remaining_after_bumper(p, b);
+                    self.transition_to_playing(
+                        state,
+                        &p.id,
+                        &p.name,
+                        primary_remaining,
+                        now_ms,
+                        machine,
+                    );
+                } else {
+                    self.refresh_remaining(state, p, bumper_end_ms - now_ms);
+                }
+            }
+            SchedulerState::Error { .. } => {
+                // No automatic recovery; user clears via /api/scheduler/clear-error.
+            }
+        }
+    }
+
+    /* ------------------------- transitions ------------------------- */
+
+    /// Single write path: mutate the machine, then mirror the label + notify
+    /// the UI. Keeping this in one place is what makes "one source of truth"
+    /// actually true.
+    fn apply_state(
+        &self,
+        state: &crate::AppState,
+        machine: &mut SchedulerState,
+        new_state: SchedulerState,
+    ) {
+        *machine = new_state;
+        let mut st = state.status.write();
+        st.scheduler_state = machine.label().to_string();
+        st.last_changed_at = Some(Utc::now());
+        drop(st);
+        let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);
+    }
+
+    fn transition_to_armed(
+        &self,
+        state: &crate::AppState,
+        p: &ProgramEntry,
+        fire_at_ms: i64,
+        machine: &mut SchedulerState,
+    ) {
+        debug!("transition -> Armed for {} at fire_at {}", p.name, fire_at_ms);
+        self.apply_state(
+            state,
+            machine,
+            SchedulerState::Armed { target_id: p.id.clone(), fire_at_ms },
+        );
+    }
+
+    fn transition_to_interstitial(
+        &self,
+        state: &crate::AppState,
+        primary_id: &str,
+        bumper_id: &str,
+        return_to_ms: u64,
+        bumper_name: &str,
+        machine: &mut SchedulerState,
+    ) {
+        self.apply_state(
+            state,
+            machine,
+            SchedulerState::InterstitialPlaying {
+                primary_id: primary_id.to_string(),
+                bumper_id: bumper_id.to_string(),
+                return_to_ms,
+            },
+        );
+        let mut st = state.status.write();
+        st.current_program_name = Some(bumper_name.to_string());
+    }
+
+    fn transition_to_playing(
+        &self,
+        state: &crate::AppState,
+        program_id: &str,
+        program_name: &str,
+        remaining_ms: i64,
+        now_ms: i64,
+        machine: &mut SchedulerState,
+    ) {
+        self.apply_state(
+            state,
+            machine,
+            SchedulerState::Playing {
+                program_id: program_id.to_string(),
+                started_at_ms: now_ms,
+            },
+        );
+        let mut st = state.status.write();
+        st.current_program_id = Some(program_id.to_string());
+        st.current_program_name = Some(program_name.to_string());
+        st.current_remaining_ms = Some(remaining_ms);
+    }
+
+    fn become_idle(&self, state: &crate::AppState, machine: &mut SchedulerState) {
+        self.apply_state(state, machine, SchedulerState::Idle);
+    }
+
+    fn transition_to_error(
+        &self,
+        state: &crate::AppState,
+        msg: &str,
+        machine: &mut SchedulerState,
+    ) {
+        warn!("scheduler error: {}", msg);
+        self.apply_state(state, machine, SchedulerState::Error { message: msg.to_string() });
+        let mut st = state.status.write();
+        st.last_error = Some(msg.to_string());
+    }
+
+    async fn begin_playing(
+        &self,
+        state: &crate::AppState,
+        _cfg: &Config,
+        p: &ProgramEntry,
+        now_ms: i64,
+        machine: &mut SchedulerState,
+    ) {
+        debug!("begin_playing {} now={}", p.name, now_ms);
+        let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
+        self.transition_to_playing(state, &p.id, &p.name, end - now_ms, now_ms, machine);
+    }
+
+    fn refresh_remaining(&self, state: &crate::AppState, p: &ProgramEntry, remaining_ms: i64) {
+        let mut st = state.status.write();
+        st.current_program_id = Some(p.id.clone());
+        st.current_program_name = Some(p.name.clone());
+        st.current_remaining_ms = Some(remaining_ms);
+    }
+
+    /* ------------------------- obs RPC wrappers ------------------------- */
+
+    async fn preload(&self, p: &ProgramEntry) -> anyhow::Result<()> {
+        if !std::path::Path::new(&p.file_path).exists() {
+            return Err(anyhow::anyhow!("file not found: {}", p.file_path));
+        }
+        let settings = json!({
+            "local_file": p.file_path,
+            "is_local_file": true,
+            "looping": false,
+            "restart_on_activate": false,
+            "close_when_inactive": true,
+            "linear_alpha": 0,
+            "speed_percent": 100,
+            "clear_on_media_end": false
+        });
+        self.obs
+            .set_input_settings(&self.target_input, settings, true)
+            .await
+    }
+
+    async fn preload_if_soon(&self, p: &ProgramEntry, cfg: &Config, now_ms: i64) {
+        let fire_at = p.start_at_ms - cfg.scheduler.lead_in_ms as i64;
+        if now_ms >= fire_at && now_ms < p.start_at_ms {
+            if let Err(e) = self.preload(p).await {
+                warn!("preload ahead-of-fire failed for {}: {}", p.name, e);
+            }
+        }
+    }
+
+    async fn cut_to(&self, p: &ProgramEntry) -> anyhow::Result<()> {
+        if !std::path::Path::new(&p.file_path).exists() {
+            return match _missing_policy() {
+                MissingFilePolicy::SkipToNext => Ok(()),
+                MissingFilePolicy::HoldFrame => Err(anyhow::anyhow!(
+                    "missing file and policy=HoldFrame: {}",
+                    p.file_path
+                )),
+                MissingFilePolicy::StopScheduler => {
+                    Err(anyhow::anyhow!("missing file: {}", p.file_path))
+                }
+            };
+        }
+        self.obs
+            .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
+            .await?;
+        debug!("triggered RESTART on {}", self.target_input);
+        Ok(())
+    }
+}
+
+fn _missing_policy() -> MissingFilePolicy {
+    MissingFilePolicy::SkipToNext
+}

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>自动播出 · tv-obsbroadcast-scheduler</title>
+    <!--
+      Fully offline: no CDN, no web fonts. Everything (layout, colors,
+      typography) lives in style.css and uses the OS font stack, so the
+      admin page works on an air-gapped broadcast machine.
+    -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body class="bg-bg text-fg font-sans antialiased">
+
+<header class="bg-surface border-b border-border px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+        <span class="inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 shadow-red-glow" id="on-air-dot"></span>
+        <span class="font-bold text-lg tracking-tight">自动播出</span>
+        <span class="text-muted text-xs">tv-obsbroadcast-scheduler</span>
+    </div>
+    <nav class="flex items-center gap-1" id="top-nav">
+        <button data-tab="dashboard" class="nav-tab nav-tab-active">主控台</button>
+        <button data-tab="playlist" class="nav-tab">节目表</button>
+        <button data-tab="timeline" class="nav-tab">时间轴</button>
+        <button data-tab="settings" class="nav-tab">设置</button>
+    </nav>
+    <div class="flex items-center gap-3 text-xs">
+        <span class="pill pill-warn" id="status-eng">引擎…</span>
+        <span class="pill pill-ok" id="status-obs">OBS…</span>
+        <span class="pill pill-muted" id="status-cfg">OBS-WS…</span>
+    </div>
+</header>
+
+<main class="px-6 py-6 max-w-screen-2xl mx-auto">
+
+    <!-- 屏 1 — Dashboard / 主控台 -->
+    <section data-tab="dashboard" class="tab-panel">
+        <div class="grid grid-cols-12 gap-6">
+
+            <!-- ON AIR 大灯区 -->
+            <div class="col-span-12 lg:col-span-7 bg-surface border border-border rounded-2xl p-8 relative overflow-hidden">
+                <div class="absolute inset-0 pointer-events-none opacity-30" id="on-air-glow"></div>
+                <div class="flex items-start justify-between relative">
+                    <div>
+                        <div class="flex items-center gap-3 mb-3">
+                            <span class="status-dot bg-red-500 shadow-red-glow" id="dash-on-air-dot"></span>
+                            <span class="text-red-400 font-bold tracking-widest text-sm">ON AIR</span>
+                        </div>
+                        <div class="text-3xl font-bold mb-1" id="dash-program-name">— 待机 —</div>
+                        <div class="text-muted text-sm" id="dash-program-meta">等待节目表启动</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="font-mono text-5xl tabular-nums text-emerald-400 leading-none" id="dash-remaining">--:--.--</div>
+                        <div class="text-xs text-muted mt-2">剩余时间（毫秒精度）</div>
+                    </div>
+                </div>
+                <div class="mt-6 flex flex-wrap gap-2">
+                    <button class="btn btn-primary" id="btn-armed">启用自动播出</button>
+                    <button class="btn btn-secondary" id="btn-pause">暂停</button>
+                    <button class="btn btn-secondary" id="btn-next">跳到下一档</button>
+                    <button class="btn btn-secondary" id="btn-restart">重新载入</button>
+                </div>
+            </div>
+
+            <!-- 下一档预告 -->
+            <div class="col-span-12 lg:col-span-5 bg-surface border border-border rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-muted tracking-widest">下一档</h3>
+                    <span class="pill pill-muted" id="dash-next-kind">Primary</span>
+                </div>
+                <div class="text-xl font-bold mb-2" id="dash-next-name">—</div>
+                <div class="font-mono text-xs text-muted truncate" id="dash-next-path">—</div>
+                <div class="mt-4 grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                        <div class="text-muted text-xs">起始时间</div>
+                        <div class="font-mono" id="dash-next-start">--:--:--</div>
+                    </div>
+                    <div>
+                        <div class="text-muted text-xs">已探测时长</div>
+                        <div class="font-mono" id="dash-next-duration">--:--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 插播快键 -->
+            <div class="col-span-12 lg:col-span-7 bg-surface border border-border rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-muted tracking-widest">插播快键</h3>
+                    <button class="btn btn-link" id="btn-manage-bumpers">管理插播 →</button>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" id="dash-bumpers-list">
+                    <div class="text-muted text-sm col-span-full">暂无插播条目，先在 <button class="btn btn-link" data-jump-tab="timeline">时间轴</button> 或 <button class="btn btn-link" data-jump-tab="playlist">节目表</button> 添加。</div>
+                </div>
+            </div>
+
+            <!-- 系统日志 -->
+            <div class="col-span-12 lg:col-span-5 bg-surface border border-border rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-muted tracking-widest">活动日志</h3>
+                    <button class="btn btn-link" id="btn-clear-log">清空</button>
+                </div>
+                <ol class="font-mono text-xs space-y-1 max-h-72 overflow-y-auto" id="dash-log"></ol>
+            </div>
+
+        </div>
+    </section>
+
+    <!-- 屏 2 — 节目表编辑器 -->
+    <section data-tab="playlist" class="tab-panel hidden">
+        <div class="bg-surface border border-border rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-bold">节目清单</h2>
+                <div class="flex items-center gap-2">
+                    <input id="playlist-add-name" placeholder="新节目名" class="form-input" />
+                    <input id="playlist-add-path" placeholder="本地视频文件路径" class="form-input w-96" />
+                    <button class="btn btn-primary" id="btn-add-program">新增节目</button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-muted text-xs uppercase tracking-widest">
+                            <th class="py-2 pr-2">#</th>
+                            <th class="py-2 pr-2">名称</th>
+                            <th class="py-2 pr-2">路径</th>
+                            <th class="py-2 pr-2">类型</th>
+                            <th class="py-2 pr-2">起始</th>
+                            <th class="py-2 pr-2">时长</th>
+                            <th class="py-2 pr-2">探测</th>
+                            <th class="py-2 pr-2 text-right">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="playlist-tbody" class="divide-y divide-border"></tbody>
+                </table>
+            </div>
+            <p class="text-muted text-xs mt-3">提示：每条节目的「起始」是 Unix 毫秒时间戳（绝对时间）。可用 <code>Ctrl + N</code> 新增，<code>Ctrl + S</code> 立即落盘。</p>
+        </div>
+    </section>
+
+    <!-- 屏 3 — 时间轴可视化 -->
+    <section data-tab="timeline" class="tab-panel hidden">
+        <div class="bg-surface border border-border rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-bold">24h 时间轴</h2>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="legend legend-primary"></span><span class="text-muted mr-3">Primary</span>
+                    <span class="legend legend-interstitial"></span><span class="text-muted mr-3">Interstitial</span>
+                    <span class="legend legend-standalone"></span><span class="text-muted mr-3">Standalone</span>
+                    <span class="legend legend-bumper"></span><span class="text-muted mr-3">Bumper</span>
+                </div>
+            </div>
+            <div class="relative h-44 bg-bg border border-border rounded-lg overflow-hidden" id="timeline-canvas">
+                <div class="absolute top-0 left-0 h-full border-l-2 border-red-500" id="timeline-now"></div>
+            </div>
+            <div class="grid grid-cols-24 gap-0 mt-2" id="timeline-hours"></div>
+        </div>
+        <div class="grid grid-cols-3 gap-4 mt-4">
+            <button class="btn btn-secondary" id="btn-tl-prev-day">← 前一天</button>
+            <button class="btn btn-primary" id="btn-tl-today">跳到今天</button>
+            <button class="btn btn-secondary" id="btn-tl-next-day">后一天 →</button>
+        </div>
+    </section>
+
+    <!-- 屏 4 — 设置 -->
+    <section data-tab="settings" class="tab-panel hidden">
+        <div class="bg-surface border border-border rounded-2xl p-6 space-y-6">
+            <h2 class="text-lg font-bold">系统设置</h2>
+
+            <div class="grid grid-cols-2 gap-6">
+                <div>
+                    <h3 class="text-sm font-semibold text-muted tracking-widest mb-2">OBS WebSocket</h3>
+                    <label class="form-label">主机</label>
+                    <input class="form-input w-full" id="cfg-host" />
+                    <label class="form-label mt-3 block">端口</label>
+                    <input class="form-input w-full" id="cfg-port" type="number" />
+                    <label class="form-label mt-3 block">密码</label>
+                    <input class="form-input w-full" id="cfg-password" type="password" />
+                    <label class="inline-flex items-center gap-2 mt-3 text-sm">
+                        <input type="checkbox" id="cfg-tls" />
+                        <span>启用 TLS（wss://）</span>
+                    </label>
+                </div>
+                <div>
+                    <h3 class="text-sm font-semibold text-muted tracking-widest mb-2">调度器</h3>
+                    <label class="form-label">受控媒体源名称</label>
+                    <input class="form-input w-full" id="cfg-target-input" />
+                    <label class="form-label mt-3 block">Lead-in（毫秒）</label>
+                    <input class="form-input w-full" id="cfg-lead-in" type="number" />
+                    <label class="form-label mt-3 block">时钟偏移（毫秒）</label>
+                    <input class="form-input w-full" id="cfg-clock-offset" type="number" />
+                    <label class="form-label mt-3 block">缺文件策略</label>
+                    <select class="form-input w-full" id="cfg-missing-policy">
+                        <option value="skip_to_next">自动跳到下一条</option>
+                        <option value="hold_frame">保持最后一帧并报错</option>
+                        <option value="stop_scheduler">暂停调度器</option>
+                    </select>
+                </div>
+            </div>
+            <div class="border-t border-border pt-4 flex items-center gap-3">
+                <button class="btn btn-primary" id="cfg-save">保存</button>
+                <button class="btn btn-secondary" id="cfg-test">测试连接</button>
+                <span class="text-xs text-muted" id="cfg-status"></span>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<footer class="px-6 py-4 text-muted text-xs text-center">
+    v0.1.0 · OBS Broadcast Scheduler · <a href="./overlay/index.html" target="_blank" class="text-emerald-400 hover:underline">打开浮窗 →</a>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+[package]
+name = "tv-obsbroadcast-scheduler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["tv-obsbroadcast-scheduler contributors"]
+license = "MIT"
+description = "Rust engine for the OBS Broadcast Scheduler plugin. Drives the broadcast scheduler over OBS WebSocket 5."
+repository = "https://github.com/yourname/tv-obsbroadcast-scheduler"
+
+[[bin]]
+name = "tv-obsbroadcast-scheduler"
+path = "src/main.rs"
+
+[lib]
+name = "tvbs_engine"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Build without tray icon (e.g. headless / CI).
+headless = []
+
+[dependencies]
+# Workspace-shared dependencies (from root Cargo.toml)
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+include_dir = { workspace = true }
+tungstenite = { workspace = true }

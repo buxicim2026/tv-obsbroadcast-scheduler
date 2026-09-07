@@ -1,0 +1,93 @@
+name: Release engine binaries
+
+# Only on v* tags (or manual dispatch). Day-to-day "does it compile?"
+# verification is ci.yml's job — that one is much faster (cargo check, no
+# LTO) and runs on every push / PR. Publishing is gated on the tag ref by the
+# `release` job below.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            archive: windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build engine
+        run: cargo build --release --manifest-path engine/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p out/${{ matrix.archive }}
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            cp target/${{ matrix.target }}/release/tv-obsbroadcast-scheduler.exe out/${{ matrix.archive }}/
+            (cd out && 7z a ${{ matrix.archive }}.zip ${{ matrix.archive }}/*) || \
+            (cd out && zip -r ${{ matrix.archive }}.zip ${{ matrix.archive }}/)
+          else
+            cp target/${{ matrix.target }}/release/tv-obsbroadcast-scheduler out/${{ matrix.archive }}/
+            (cd out && tar czf ${{ matrix.archive }}.tar.gz ${{ matrix.archive }}/)
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.archive }}
+          path: out/${{ matrix.archive }}.*
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: false

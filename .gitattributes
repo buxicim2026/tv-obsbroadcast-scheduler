@@ -1,0 +1,29 @@
+# Default to LF line endings across the repo so we get a sane unix-y git
+# history regardless of OS. CI runners are mostly Linux / macOS; the
+# Windows OBS build also handles LF transparently in C.
+*                 text=auto eol=lf
+*.png             binary
+*.jpg             binary
+*.gif             binary
+*.ico             binary
+*.woff            binary
+*.woff2           binary
+
+# OBS plugin binaries don't need their EOL stripped.
+*.dll             binary
+*.so              binary
+*.dylib           binary
+*.lib             binary
+
+# Shell scripts must stay LF even on Windows editors that would otherwise
+# rewrite them.
+*.sh              text eol=lf
+# PowerShell on Windows expects CRLF.
+# (note: gitattributes has no inline comments — keep them on their own line)
+*.ps1             text eol=crlf
+*.ini             text eol=lf
+*.json            text eol=lf
+*.toml            text eol=lf
+*.md              text eol=lf
+*.yml             text eol=lf
+*.yaml            text eol=lf

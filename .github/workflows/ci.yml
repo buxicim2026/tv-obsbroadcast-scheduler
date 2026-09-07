@@ -1,0 +1,93 @@
+name: CI
+
+# Fast feedback: run `cargo check` + clippy + fmt on every push / PR.
+# This is the "does it compile?" gate — much faster than the release build
+# (no LTO, no codegen) and it runs on all three platforms' toolchains via
+# ubuntu/macos/windows runners, so no local MinGW / MSVC install is needed.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Intentionally NOT setting `-Dwarnings`: this workflow's job is to answer
+  # "does it compile across platforms?" Warnings are surfaced by the clippy
+  # step (advisory) rather than failing the build.
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git
+            target
+          key: ci-${{ matrix.os }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+        # Formatting is advisory: don't fail the whole build on style.
+        continue-on-error: true
+
+      # The real gate. Note: no GNU/MinGW needed on windows-2022 — the runner
+      # ships MSVC and cargo uses it for the host toolchain.
+      - name: cargo check (all targets)
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test --workspace
+
+  frontend-lint:
+    name: frontend sanity
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The admin / overlay UIs must work fully offline: fail CI if anyone
+      # reintroduces a CDN or web-font reference.
+      - name: Assert no external CDN / font references
+        run: |
+          set -euo pipefail
+          if grep -rInE 'cdn\.jsdelivr|cdnjs|unpkg\.com|fonts\.googleapis|fonts\.gstatic' \
+               admin overlay; then
+            echo "::error::admin/overlay must stay offline (no CDN or web fonts)"
+            exit 1
+          fi
+          echo "OK: no external asset references"
+
+      - name: Check referenced local files exist
+        run: |
+          set -euo pipefail
+          for f in admin/style.css admin/app.js admin/timeline.js admin/bumpers.js \
+                   overlay/style.css overlay/overlay.js; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          echo "OK: all frontend assets present"
