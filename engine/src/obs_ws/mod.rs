@@ -21,7 +21,7 @@ pub mod codec;
 pub mod messages;
 
 pub use codec::{ObsWsClient, ObsWsCmd};
-pub use messages::{MediaInputStatus, MediaInputAction, ObsVersion, RequestId};
+pub use messages::{MediaInputAction, MediaInputStatus, ObsVersion, RequestId};
 
 use std::sync::Arc;
 
@@ -77,10 +77,7 @@ impl Default for ClientHandle {
 /// Resilient connector: tries to (re)connect with exponential backoff.
 /// Drives `ClientHandle::set` on success so other components can pick up the
 /// new client without restarting.
-pub async fn resilient_connector(
-    cfg: ObsWsConfig,
-    handle: ClientHandle,
-) {
+pub async fn resilient_connector(cfg: ObsWsConfig, handle: ClientHandle) {
     let mut backoff_ms = 500u64;
     let max_backoff_ms = 30_000u64;
     loop {

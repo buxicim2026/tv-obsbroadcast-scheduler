@@ -154,10 +154,10 @@ impl Default for SchedulerConfig {
 impl Config {
     pub fn load_or_init(path: &Path) -> Result<Self> {
         if path.exists() {
-            let raw = fs::read_to_string(path)
-                .with_context(|| format!("read {}", path.display()))?;
-            let cfg: Config = serde_json::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?;
+            let raw =
+                fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            let cfg: Config =
+                serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
             Ok(cfg)
         } else {
             let cfg = Config::default();
@@ -172,8 +172,7 @@ impl Config {
             fs::create_dir_all(parent).ok();
         }
         let tmp = with_extension(path, "json.tmp");
-        fs::write(&tmp, &data)
-            .with_context(|| format!("write tmp {}", tmp.display()))?;
+        fs::write(&tmp, &data).with_context(|| format!("write tmp {}", tmp.display()))?;
         fs::rename(&tmp, path)
             .with_context(|| format!("rename tmp {} -> {}", tmp.display(), path.display()))?;
         Ok(())

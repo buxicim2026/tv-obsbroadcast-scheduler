@@ -29,8 +29,7 @@ pub fn ready_to_fire(
         .any(|b| {
             let offset = b.at_into_program_ms as i64;
             // Same window as the inter-cut: anywhere in [offset - lead_in, offset).
-            now_ms_into_program >= offset - lead_in_ms as i64
-                && now_ms_into_program < offset
+            now_ms_into_program >= offset - lead_in_ms as i64 && now_ms_into_program < offset
         })
 }
 

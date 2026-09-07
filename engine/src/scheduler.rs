@@ -34,10 +34,7 @@ pub enum SchedulerState {
     /// Not armed. No timeline progression.
     Idle,
     /// Will fire `SetInputSettings(target_input, next)` at `fire_at_ms`.
-    Armed {
-        target_id: String,
-        fire_at_ms: i64,
-    },
+    Armed { target_id: String, fire_at_ms: i64 },
     /// Currently driving a program. `started_at_ms` is when this program
     /// began playing.
     Playing {
@@ -72,9 +69,7 @@ impl SchedulerState {
         match self {
             SchedulerState::Playing { program_id, .. } => Some(program_id.as_str()),
             SchedulerState::Armed { target_id, .. } => Some(target_id.as_str()),
-            SchedulerState::InterstitialPlaying { primary_id, .. } => {
-                Some(primary_id.as_str())
-            }
+            SchedulerState::InterstitialPlaying { primary_id, .. } => Some(primary_id.as_str()),
             SchedulerState::Idle | SchedulerState::Error { .. } => None,
         }
     }
@@ -108,8 +103,7 @@ impl Scheduler {
                 let cfg = state.config.read();
                 (
                     cfg.clone(),
-                    cfg.scheduler.enabled
-                        && matches!(state.status.read().obs_connected, true),
+                    cfg.scheduler.enabled && matches!(state.status.read().obs_connected, true),
                 )
             };
             if !want_running {
@@ -124,12 +118,7 @@ impl Scheduler {
         }
     }
 
-    async fn tick_once(
-        &self,
-        state: &crate::AppState,
-        cfg: &Config,
-        machine: &mut SchedulerState,
-    ) {
+    async fn tick_once(&self, state: &crate::AppState, cfg: &Config, machine: &mut SchedulerState) {
         let now_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
 
         match machine {
@@ -144,7 +133,10 @@ impl Scheduler {
                     self.transition_to_armed(state, next, fire_at, machine);
                 }
             }
-            SchedulerState::Armed { target_id, fire_at_ms } => {
+            SchedulerState::Armed {
+                target_id,
+                fire_at_ms,
+            } => {
                 let target_id = target_id.clone();
                 let fire_at = *fire_at_ms;
                 if let Some(p) = cfg.playlist.items.iter().find(|p| p.id == target_id) {
@@ -168,13 +160,19 @@ impl Scheduler {
                     self.become_idle(state, machine);
                 }
             }
-            SchedulerState::Playing { program_id, started_at_ms } => {
+            SchedulerState::Playing {
+                program_id,
+                started_at_ms,
+            } => {
                 let program_id = program_id.clone();
                 let started = *started_at_ms;
 
                 let Some(p) = cfg.playlist.items.iter().find(|p| p.id == program_id) else {
                     // Program was deleted from the playlist while on air. Hold.
-                    warn!("current program id={} no longer exists; holding", program_id);
+                    warn!(
+                        "current program id={} no longer exists; holding",
+                        program_id
+                    );
                     return;
                 };
 
@@ -185,7 +183,10 @@ impl Scheduler {
 
                 // ---- Bumper detection -------------------------------------
                 if crate::interrupt::ready_to_fire(
-                    &cfg.playlist.bumpers, p, into_program_ms, lead_in,
+                    &cfg.playlist.bumpers,
+                    p,
+                    into_program_ms,
+                    lead_in,
                 ) {
                     if let Some(b) = cfg
                         .playlist
@@ -198,12 +199,8 @@ impl Scheduler {
                                 "firing bumper {} at +{}ms into {}",
                                 content.name, into_program_ms, p.name
                             );
-                            match crate::interrupt::trigger_bumper(
-                                &self.obs,
-                                &self.target_input,
-                                b,
-                            )
-                            .await
+                            match crate::interrupt::trigger_bumper(&self.obs, &self.target_input, b)
+                                .await
                             {
                                 Ok(()) => {
                                     let return_to = crate::interrupt::return_to_ms(b);
@@ -244,7 +241,11 @@ impl Scheduler {
                     self.refresh_remaining(state, p, end - now_ms);
                 }
             }
-            SchedulerState::InterstitialPlaying { primary_id, bumper_id, return_to_ms } => {
+            SchedulerState::InterstitialPlaying {
+                primary_id,
+                bumper_id,
+                return_to_ms,
+            } => {
                 let primary_id = primary_id.clone();
                 let bumper_id = bumper_id.clone();
                 let _return_to = *return_to_ms;
@@ -263,12 +264,9 @@ impl Scheduler {
                 let bumper_end_ms = bumper_start_ms + bumper_dur;
 
                 if now_ms >= bumper_end_ms {
-                    if let Err(e) = crate::interrupt::trigger_resume_primary(
-                        &self.obs,
-                        &self.target_input,
-                        p,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::interrupt::trigger_resume_primary(&self.obs, &self.target_input, p)
+                            .await
                     {
                         warn!("resume primary failed: {e}");
                     }
@@ -320,11 +318,17 @@ impl Scheduler {
         fire_at_ms: i64,
         machine: &mut SchedulerState,
     ) {
-        debug!("transition -> Armed for {} at fire_at {}", p.name, fire_at_ms);
+        debug!(
+            "transition -> Armed for {} at fire_at {}",
+            p.name, fire_at_ms
+        );
         self.apply_state(
             state,
             machine,
-            SchedulerState::Armed { target_id: p.id.clone(), fire_at_ms },
+            SchedulerState::Armed {
+                target_id: p.id.clone(),
+                fire_at_ms,
+            },
         );
     }
 
@@ -384,7 +388,13 @@ impl Scheduler {
         machine: &mut SchedulerState,
     ) {
         warn!("scheduler error: {}", msg);
-        self.apply_state(state, machine, SchedulerState::Error { message: msg.to_string() });
+        self.apply_state(
+            state,
+            machine,
+            SchedulerState::Error {
+                message: msg.to_string(),
+            },
+        );
         let mut st = state.status.write();
         st.last_error = Some(msg.to_string());
     }

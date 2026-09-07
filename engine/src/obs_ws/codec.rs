@@ -189,8 +189,7 @@ impl ObsWsClient {
     /// Background loop: owns the socket and the command receiver, and routes
     /// responses back via the `pending` map.
     fn spawn(self: &Arc<Self>, mut cmd_rx: mpsc::Receiver<ObsWsCmd>, mut ws: WsStream) {
-        let pending: Arc<Mutex<HashMap<u64, Pending>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<u64, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
         let next_id = self.next_id.clone();
         let pending_recv = pending.clone();
 

@@ -94,10 +94,7 @@ async fn main() -> Result<()> {
     let config = Config::load_or_init(&cfg_path).context("load config")?;
     let config = Arc::new(RwLock::new(config));
 
-    let host = cli
-        .host
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let host = cli.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
     let port = cli.port.unwrap_or(8789);
 
     // Shared application state — populated further by subsequent todos.
@@ -113,10 +110,7 @@ async fn main() -> Result<()> {
             // The connector keeps trying with backoff; we just wait on its
             // side-channel and start the scheduler when a client is up.
             let handle = obs_ws::ClientHandle::new();
-            tokio::spawn(obs_ws::resilient_connector(
-                cfg_obs.clone(),
-                handle.clone(),
-            ));
+            tokio::spawn(obs_ws::resilient_connector(cfg_obs.clone(), handle.clone()));
 
             // Wait for the first successful connect.
             loop {
@@ -124,9 +118,7 @@ async fn main() -> Result<()> {
                     let scheduler = sched::Scheduler::new(client, target_input.clone());
                     // `run` is defined as `self: Arc<Self>`, so it must be
                     // called through an Arc.
-                    Arc::new(scheduler)
-                        .run(state_for_tasks.clone())
-                        .await;
+                    Arc::new(scheduler).run(state_for_tasks.clone()).await;
                     // Unreachable in practice: `run` never returns.
                     return;
                 }
@@ -174,8 +166,7 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut s) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
             s.recv().await;
         }

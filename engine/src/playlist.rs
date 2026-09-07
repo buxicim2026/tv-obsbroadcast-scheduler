@@ -21,10 +21,7 @@ pub fn effective_now_ms(cfg: &SchedulerConfig) -> i64 {
 /// `now_ms` falls in `[start_at_ms, start_at_ms + declared_duration_ms)`.
 /// Returns the program that should currently be driving the scene, or `None`.
 pub fn current_program<'a>(cfg: &'a Config, now_ms: i64) -> Option<&'a ProgramEntry> {
-    cfg.playlist
-        .items
-        .iter()
-        .find(|p| in_window(p, now_ms))
+    cfg.playlist.items.iter().find(|p| in_window(p, now_ms))
 }
 
 /// Next program to switch to (strictly after `now_ms`). Returns `None` if
@@ -153,7 +150,10 @@ mod tests {
         cfg.playlist.items.push(program(0, 1000));
         cfg.playlist.items.push(program(1000, 1000));
         assert_eq!(current_program(&cfg, 500).map(|p| p.start_at_ms), Some(0));
-        assert_eq!(current_program(&cfg, 1500).map(|p| p.start_at_ms), Some(1000));
+        assert_eq!(
+            current_program(&cfg, 1500).map(|p| p.start_at_ms),
+            Some(1000)
+        );
         // ProgramEntry has no PartialEq (and doesn't need one), so assert on
         // the Option directly rather than comparing against `None`.
         assert!(current_program(&cfg, 999_999).is_none());

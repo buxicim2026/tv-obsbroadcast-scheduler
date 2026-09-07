@@ -9,11 +9,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -78,9 +74,7 @@ pub async fn upsert_item(
         } else {
             cfg.playlist.items.push(entry.clone());
         }
-        cfg.playlist
-            .items
-            .sort_by_key(|p| p.start_at_ms);
+        cfg.playlist.items.sort_by_key(|p| p.start_at_ms);
     }
     let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     persist(state.config.clone()).await?;

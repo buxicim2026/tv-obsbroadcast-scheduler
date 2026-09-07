@@ -32,11 +32,11 @@ pub enum MediaInputAction {
 impl MediaInputAction {
     pub fn as_str(self) -> &'static str {
         match self {
-            MediaInputAction::Restart  => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
-            MediaInputAction::Pause    => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE",
-            MediaInputAction::Play     => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY",
-            MediaInputAction::Stop     => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP",
-            MediaInputAction::Next     => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
+            MediaInputAction::Restart => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+            MediaInputAction::Pause => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE",
+            MediaInputAction::Play => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY",
+            MediaInputAction::Stop => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP",
+            MediaInputAction::Next => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
             MediaInputAction::Previous => "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PREVIOUS",
         }
     }
@@ -66,9 +66,17 @@ pub struct ObsVersion {
 impl<'a> From<&'a Value> for ObsVersion {
     fn from(v: &Value) -> Self {
         Self {
-            obs_version: v.get("obsVersion").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            obs_version: v
+                .get("obsVersion")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
             rpc_version: v.get("rpcVersion").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-            platform: v.get("platform").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            platform: v
+                .get("platform")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
