@@ -79,14 +79,16 @@ jobs:
       - name: Package artifacts
         shell: bash
         run: |
+          # Prefix with "engine-" so these stay clearly distinguishable from
+          # the plugin bundles built by plugin.yml.
           mkdir -p out/${{ matrix.archive }}
           if [[ "${{ matrix.os }}" == windows-* ]]; then
             cp target/${{ matrix.target }}/release/tv-obsbroadcast-scheduler.exe out/${{ matrix.archive }}/
-            (cd out && 7z a ${{ matrix.archive }}.zip ${{ matrix.archive }}/*) || \
-            (cd out && zip -r ${{ matrix.archive }}.zip ${{ matrix.archive }}/)
+            (cd out && 7z a engine-${{ matrix.archive }}.zip ${{ matrix.archive }}/*) || \
+            (cd out && zip -r engine-${{ matrix.archive }}.zip ${{ matrix.archive }}/)
           else
             cp target/${{ matrix.target }}/release/tv-obsbroadcast-scheduler out/${{ matrix.archive }}/
-            (cd out && tar czf ${{ matrix.archive }}.tar.gz ${{ matrix.archive }}/)
+            (cd out && tar czf engine-${{ matrix.archive }}.tar.gz ${{ matrix.archive }}/)
           fi
 
       - name: Upload build artifacts

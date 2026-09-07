@@ -114,30 +114,63 @@ jobs:
           fi
           cmake --build plugin/build --config Release
 
-      - name: Assemble bundle
+      # Guard against the silent failure mode where the DLL compiles and links
+      # fine but exports no module entry points — OBS then simply cannot load
+      # the plugin and the source never appears in "Add Source".
+      - name: Verify plugin exports (Windows)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          $dll = "plugin/build/Release/tv-obsbroadcast-scheduler.dll"
+          $raw = @(dumpbin /exports "$dll" 2>&1) | Out-String
+          foreach ($sym in @('obs_module_load', 'obs_module_ver', 'obs_module_set_pointer')) {
+            if ($raw -notmatch $sym) {
+              Write-Host "--- dumpbin output ---"
+              Write-Host $raw.Substring(0, [Math]::Min(4000, $raw.Length))
+              throw "plugin DLL does not export $sym - OBS would fail to load it"
+            }
+            Write-Host "exported: $sym"
+          }
+
+      - name: Assemble bundle (OBS plugin layout)
         shell: bash
         run: |
-          OUT="dist/tv-obsbroadcast-scheduler-${{ matrix.archive }}"
+          # OBS loads user-installed plugins from:
+          #   Windows: %APPDATA%\obs-studio\plugins\<module>\bin\64bit\*.dll
+          #   Linux:   ~/.config/obs-studio/plugins/<module>/bin/64bit/*.so
+          #   macOS:   ~/Library/Application Support/obs-studio/plugins/<module>/bin/*.so
+          # and reads locale from <module>/data/locale/*.ini.
+          #
+          # The Rust engine goes to <module>/data/engine/ because
+          # obs_get_module_data_path() returns <module>/data and the C plugin
+          # spawns "<data_dir>/engine/<binary>".
+          #
+          # Engine artifacts: `cargo build --manifest-path engine/Cargo.toml`
+          # puts them in the WORKSPACE root target/release/ (engine/ is a
+          # workspace member), NOT engine/target/.
+          OUT="dist/tv-obsbroadcast-scheduler"
           rm -rf "$OUT"
-          mkdir -p "$OUT/engine" "$OUT/data/locale"
-          # Engine is built via `cargo build --manifest-path engine/Cargo.toml`,
-          # but engine/ is a workspace member, so Cargo puts artifacts in the
-          # WORKSPACE root target/, i.e. <repo>/target/release/ — not
-          # engine/target/.
+          mkdir -p "$OUT/data/locale" "$OUT/data/engine"
+          cp plugin/data/locale/*.ini "$OUT/data/locale/"
+
           if [[ "${{ matrix.os }}" == windows-* ]]; then
-            cp plugin/build/Release/tv-obsbroadcast-scheduler.dll "$OUT/"
-            cp target/release/tv-obsbroadcast-scheduler.exe "$OUT/engine/"
-            (cd dist && 7z a "${{ matrix.archive }}.zip" "$(basename $OUT)")
+            mkdir -p "$OUT/bin/64bit"
+            cp plugin/build/Release/tv-obsbroadcast-scheduler.dll "$OUT/bin/64bit/"
+            cp target/release/tv-obsbroadcast-scheduler.exe "$OUT/data/engine/"
+            (cd dist && 7z a "tv-obsbroadcast-scheduler-${{ matrix.archive }}.zip" "tv-obsbroadcast-scheduler")
           elif [[ "${{ matrix.os }}" == macos-* ]]; then
-            cp plugin/build/Release/tv-obsbroadcast-scheduler.so "$OUT/" || \
-            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
-            cp target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
-            (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
+            mkdir -p "$OUT/bin"
+            cp plugin/build/Release/tv-obsbroadcast-scheduler.so "$OUT/bin/" || \
+              cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/bin/"
+            cp target/release/tv-obsbroadcast-scheduler "$OUT/data/engine/"
+            (cd dist && tar czf "tv-obsbroadcast-scheduler-${{ matrix.archive }}.tar.gz" "tv-obsbroadcast-scheduler")
           else
-            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
-            cp target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
-            (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
+            mkdir -p "$OUT/bin/64bit"
+            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/bin/64bit/"
+            cp target/release/tv-obsbroadcast-scheduler "$OUT/data/engine/"
+            (cd dist && tar czf "tv-obsbroadcast-scheduler-${{ matrix.archive }}.tar.gz" "tv-obsbroadcast-scheduler")
           fi
+          find "$OUT" -type f | sort
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4

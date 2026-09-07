@@ -53,6 +53,19 @@ set_target_properties(tv-obsbroadcast-scheduler PROPERTIES
   OUTPUT_NAME "tv-obsbroadcast-scheduler"
 )
 
+# CRITICAL for Windows: OBS finds a plugin by looking up the exported symbol
+# `obs_module_load` (and obs_module_ver / obs_module_set_pointer ...). Those
+# are declared through MODULE_EXPORT -> EXPORT, which expands to
+# __declspec(dllimport) when a plugin is compiled (LIBOBS_EXPORTS is not
+# defined), so nothing gets EXPORTED and OBS silently fails to load the DLL
+# — the source never shows up in "Add Source". MSVC exports nothing from a
+# DLL by default, so ask CMake to export all symbols.
+if(WIN32)
+  set_target_properties(tv-obsbroadcast-scheduler PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS TRUE
+  )
+endif()
+
 # Windows: keep <windows.h> from pulling in <winsock.h> (OBS headers do
 # include windows.h, and any winsock2.h that comes afterwards would then
 # redefine sockaddr/fd_set/timeval etc.). All socket code uses winsock2.h.
@@ -104,5 +117,5 @@ install(TARGETS tv-obsbroadcast-scheduler
   LIBRARY DESTINATION .
 )
 
-# Locale files travel with the bundle.
-install(DIRECTORY data/locale DESTINATION ./data/locale)
+# Locale files travel with the bundle (OBS expects <module>/data/locale/*.ini).
+install(DIRECTORY data/locale DESTINATION ./data)
