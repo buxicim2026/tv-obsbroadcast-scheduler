@@ -27,17 +27,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::config::ObsWsConfig;
 
-/// Construct a connected client and spawn its background loop. Returns a
-/// handle that the scheduler and admin endpoints share.
+/// Construct a connected, authenticated client. `ObsWsClient::connect` spawns
+/// the background receive loop itself, so there is nothing else to wire up
+/// here. Returns a handle the scheduler and admin endpoints share.
 pub async fn connect(config: ObsWsConfig) -> anyhow::Result<Arc<ObsWsClient>> {
     let client = ObsWsClient::connect(&config).await?;
-    let (cmd_tx, cmd_rx) = mpsc::channel::<ObsWsCmd>(64);
-    client.spawn_loop(cmd_rx).await;
     info!("obs-websocket connected ({}:{})", config.host, config.port);
     Ok(client)
 }

@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use tvbs_engine::{app_status::AppStatus, AppState};
+use crate::{app_status::AppStatus, AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct UpsertItem {
@@ -82,7 +82,7 @@ pub async fn upsert_item(
             .items
             .sort_by_key(|p| p.start_at_ms);
     }
-    let _ = state.notify.send(tvbs_engine::NotifyKind::PlaylistChanged);
+    let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     persist(state.config.clone()).await?;
     Ok(Json(json!({"ok": true, "id": entry.id})))
 }
@@ -98,7 +98,7 @@ pub async fn delete_item(
             .bumpers
             .retain(|b| b.target_program_id != payload.id && b.content.id != payload.id);
     }
-    let _ = state.notify.send(tvbs_engine::NotifyKind::PlaylistChanged);
+    let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     persist(state.config.clone()).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -111,7 +111,7 @@ pub async fn enable_scheduler(
         let mut cfg = state.config.write();
         cfg.scheduler.enabled = payload.enabled;
     }
-    let _ = state.notify.send(tvbs_engine::NotifyKind::SchedulerStateChanged);
+    let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);
     persist(state.config.clone()).await?;
     Ok(Json(json!({"ok": true, "enabled": payload.enabled})))
 }
@@ -120,7 +120,7 @@ async fn persist(
     config: Arc<parking_lot::RwLock<crate::config::Config>>,
 ) -> Result<(), (StatusCode, String)> {
     let cfg_clone = config.read().clone();
-    let path = tvbs_engine::config_path();
+    let path = crate::config_path();
     tokio::task::spawn_blocking(move || cfg_clone.save_atomic(&path))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?

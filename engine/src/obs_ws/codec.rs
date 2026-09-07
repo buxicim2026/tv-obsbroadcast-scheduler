@@ -1,9 +1,16 @@
-//! obs-websocket 5 client. Owns a single WebSocket connection. Each RPC
-//! command is wrapped in `ObsWsCmd` and pushed onto a `mpsc`; a background
-//! task owns the `WebSocketStream`, allocates request ids, sends payloads,
-//! and routes responses back through `oneshot` channels. The 1-by-1 mapping
-//! between `pending` entries and in-flight commands is what guarantees that
-//! the response gets back to the right caller.
+//! obs-websocket 5 client.
+//!
+//! Owns a single WebSocket connection to OBS. Each RPC is wrapped in an
+//! `ObsWsCmd` and pushed onto an mpsc; a background task owns the socket,
+//! allocates request ids, sends payloads, and routes responses back through
+//! `oneshot` channels. The 1:1 mapping between `pending` entries and
+//! in-flight commands is what guarantees a response reaches its caller.
+//!
+//! Only the four requests the scheduler actually needs are implemented:
+//!   * GetVersion
+//!   * SetInputSettings
+//!   * TriggerMediaInputAction
+//!   * GetMediaInputStatus
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,18 +22,27 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{client_async, MaybeTlsStream};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, warn};
 
+use super::messages::{MediaInputAction, MediaInputStatus, ObsVersion};
 use crate::config::ObsWsConfig;
 
-use super::messages::{MediaInputAction, MediaInputStatus, ObsVersion};
+/// Concrete stream type produced by `connect_async` (plain TCP for ws://,
+/// TLS for wss:// — the enum hides the difference).
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Outbound command types. The `resp` channel carries the awaited response
-/// back to the caller; each RPC variant declares its own response shape.
+/// How a resolved response is handed back to its awaiting caller.
+enum Pending {
+    Ack(oneshot::Sender<Result<()>>),
+    Status(oneshot::Sender<Result<MediaInputStatus>>),
+    Version(oneshot::Sender<Result<ObsVersion>>),
+}
+
+/// Outbound command. `resp` carries the awaited value back to the caller.
 #[derive(Debug)]
 pub enum ObsWsCmd {
     SetInputSettings {
@@ -49,11 +65,11 @@ pub enum ObsWsCmd {
     },
 }
 
-/// Shared client. Cheap to clone — internal cmd_tx is enough for most callers.
+/// Shared client handle. Cheap to clone around (the mpsc Sender is enough).
 pub struct ObsWsClient {
     cfg: ObsWsConfig,
     cmd_tx: mpsc::Sender<ObsWsCmd>,
-    next_request_id: Arc<Mutex<u64>>,
+    next_id: Arc<Mutex<u64>>,
 }
 
 impl ObsWsClient {
@@ -65,39 +81,18 @@ impl ObsWsClient {
             format!("ws://{}:{}/", cfg.host, cfg.port)
         };
 
-        let request = Request::builder()
-            .method("GET")
-            .uri(&url)
-            .header("Host", format!("{}:{}", cfg.host, cfg.port))
-            .header("Upgrade", "websocket")
-            .header("Connection", "Upgrade")
-            .header(
-                "Sec-WebSocket-Key",
-                base64::engine::general_purpose::STANDARD.encode(&[0u8; 16]),
-            )
-            .header("Sec-WebSocket-Version", "13")
-            .body(())
-            .map_err(|e| anyhow!("build WS handshake: {e}"))?;
-
-        let tcp = tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port))
+        let (mut ws, _resp) = connect_async(url.as_str())
             .await
-            .with_context(|| format!("tcp connect to {}:{}", cfg.host, cfg.port))?;
-        tcp.set_nodelay(true).ok();
+            .with_context(|| format!("connect to obs websocket at {url}"))?;
 
-        let (stream, _response) = client_async(request, tcp)
-            .await
-            .context("ws handshake to obs")?;
-        let mut ws = stream;
-
-        // Authentication: receive `op 0 Hello`, send `op 1 Identify`.
+        // Handshake: Hello (op 0) -> Identify (op 1) -> Identified (op 2).
         let hello = recv_op(&mut ws, 0).await.context("obs hello")?;
         let auth = hello
             .get("d")
             .and_then(|d| d.get("authentication"))
             .cloned()
             .unwrap_or(Value::Null);
-        let identify = build_identify(&auth, cfg.password.as_deref());
-        send_op(&mut ws, 1, identify).await?;
+        send_op(&mut ws, 1, build_identify(&auth, cfg.password.as_deref())).await?;
         let identified = recv_op(&mut ws, 2).await.context("obs identified")?;
         if identified.get("op").and_then(|v| v.as_u64()) != Some(2) {
             bail!(
@@ -110,18 +105,24 @@ impl ObsWsClient {
         let client = Arc::new(Self {
             cfg: cfg.clone(),
             cmd_tx,
-            next_request_id: Arc::new(Mutex::new(1)),
+            next_id: Arc::new(Mutex::new(1)),
         });
-
-        client.spawn_loop(cmd_rx, ws).await;
+        client.spawn(cmd_rx, ws);
         Ok(client)
     }
 
     fn alloc_id(&self) -> u64 {
-        let mut g = self.next_request_id.lock();
+        let mut g = self.next_id.lock();
         let id = *g;
         *g = g.wrapping_add(1);
         id
+    }
+
+    async fn call(&self, cmd: ObsWsCmd) -> Result<()> {
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|_| anyhow!("obs-ws cmd channel closed"))
     }
 
     /// Swap a Media Source's `local_file` to a new path.
@@ -132,301 +133,231 @@ impl ObsWsClient {
         overlay: bool,
     ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ObsWsCmd::SetInputSettings {
-                input_name: input_name.to_string(),
-                settings,
-                overlay,
-                resp: tx,
-            })
-            .await
-            .map_err(|_| anyhow!("obs-ws cmd channel closed"))?;
+        self.call(ObsWsCmd::SetInputSettings {
+            input_name: input_name.to_string(),
+            settings,
+            overlay,
+            resp: tx,
+        })
+        .await?;
         rx.await
             .map_err(|_| anyhow!("set_input_settings response dropped"))?
     }
 
-    /// Send an action to a Media Source.
+    /// Send an action to a Media Source (restart / pause / play / ...).
     pub async fn trigger_media_input_action(
         &self,
         input_name: &str,
         action: MediaInputAction,
     ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ObsWsCmd::TriggerMediaInputAction {
-                input_name: input_name.to_string(),
-                action,
-                resp: tx,
-            })
-            .await
-            .map_err(|_| anyhow!("obs-ws cmd channel closed"))?;
+        self.call(ObsWsCmd::TriggerMediaInputAction {
+            input_name: input_name.to_string(),
+            action,
+            resp: tx,
+        })
+        .await?;
         rx.await
             .map_err(|_| anyhow!("trigger_media_input_action response dropped"))?
     }
 
-    /// Read Media Source status (`mediaState`, `mediaDuration` ms, `mediaCursor` ms).
+    /// Read Media Source status (state, duration ms, cursor ms).
     pub async fn get_media_input_status(&self, input_name: &str) -> Result<MediaInputStatus> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ObsWsCmd::GetMediaInputStatus {
-                input_name: input_name.to_string(),
-                resp: tx,
-            })
-            .await
-            .map_err(|_| anyhow!("obs-ws cmd channel closed"))?;
+        self.call(ObsWsCmd::GetMediaInputStatus {
+            input_name: input_name.to_string(),
+            resp: tx,
+        })
+        .await?;
         rx.await
             .map_err(|_| anyhow!("get_media_input_status response dropped"))?
     }
 
-    /// Query OBS version (used by /healthz, admin UI banner).
+    /// Query OBS version (used by /healthz and the admin banner).
     pub async fn get_version(&self) -> Result<ObsVersion> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ObsWsCmd::GetVersion { resp: tx })
-            .await
-            .map_err(|_| anyhow!("obs-ws cmd channel closed"))?;
+        self.call(ObsWsCmd::GetVersion { resp: tx }).await?;
         rx.await
             .map_err(|_| anyhow!("get_version response dropped"))?
     }
 
-    /// Background loop: owns the WebSocketStream and the command receiver.
-    /// Routes response frames back via the `pending` map.
-    async fn spawn_loop(
-        self: &Arc<Self>,
-        mut cmd_rx: mpsc::Receiver<ObsWsCmd>,
-        mut ws: tokio_tungstenite::WebSocketStream<
-            MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) {
-        // `pending` maps the obs-websocket requestId -> the oneshot awaiting
-        // the response payload. We register before send and remove on receive.
-        let pending: Arc<Mutex<HashMap<u64, PendingTask>>> =
+    /// Configuration snapshot (useful for reconnect logic).
+    pub fn config(&self) -> &ObsWsConfig {
+        &self.cfg
+    }
+
+    /// Background loop: owns the socket and the command receiver, and routes
+    /// responses back via the `pending` map.
+    fn spawn(self: &Arc<Self>, mut cmd_rx: mpsc::Receiver<ObsWsCmd>, mut ws: WsStream) {
+        let pending: Arc<Mutex<HashMap<u64, Pending>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let next_id = self.next_id.clone();
+        let pending_recv = pending.clone();
 
-        enum PendingTask {
-            Status(oneshot::Sender<Result<MediaInputStatus>>),
-            Version(oneshot::Sender<Result<ObsVersion>>),
-            Ack(oneshot::Sender<Result<()>>),
-        }
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
 
-        let pending_for_recv = pending.clone();
-        let id_alloc = self.next_request_id.clone();
-
-        // Helper to issue a request with an entry in `pending`.
-        async fn issue<F>(
-            ws: &mut tokio_tungstenite::WebSocketStream<
-                MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            id: u64,
-            request_type: &str,
-            request_data: Value,
-            pending: &Arc<Mutex<HashMap<u64, PendingTask>>>,
-            store: F,
-        ) -> Result<()>
-        where
-            F: FnOnce(oneshot::Sender<()>) -> PendingTask,
-        {
-            let payload = json!({
-                "op": 6,
-                "d": {
-                    "requestId": id.to_string(),
-                    "requestType": request_type,
-                    "requestData": request_data
-                }
-            });
-            // The wrapper Future<Output = ()> is just used to give us a Sender
-            // we can store in the enum; we don't actually await it.
-            let (tx, _future) = oneshot::channel::<()>();
-            pending.lock().insert(id, store(tx));
-            send_msg(ws, payload).await
-        }
-
-        loop {
-            tokio::select! {
-                biased;
-
-                incoming = ws.next() => {
-                    let Some(frame) = incoming else { break };
-                    match frame {
-                        Ok(Message::Text(txt)) => {
-                            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                    // ---- inbound frames -------------------------------------
+                    incoming = ws.next() => {
+                        let Some(frame) = incoming else { break };
+                        match frame {
+                            Ok(Message::Text(txt)) => {
+                                let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue };
                                 let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(99);
                                 if op == 7 {
-                                    // RequestResponse — server returns op 7 with
-                                    // requestData; the payload is in `d.requestData`.
-                                    let rid = v.get("d").and_then(|x| x.get("requestId"))
-                                        .and_then(|x| x.as_u64());
-                                    let status = v.get("d").and_then(|x| x.get("requestStatus"))
-                                        .cloned().unwrap_or(Value::Null);
-                                    let data = v.get("d").and_then(|x| x.get("responseData"))
-                                        .cloned().unwrap_or(Value::Null);
-                                    if let Some(rid) = rid {
-                                        let task = pending_for_recv.lock().remove(&rid);
-                                        match task {
-                                            Some(PendingTask::Status(t)) => {
-                                                if status.get("result").and_then(|x| x.as_bool()).unwrap_or(false) {
-                                                    match serde_json::from_value::<MediaInputStatus>(data) {
-                                                        Ok(s) => { let _ = t.send(Ok(s)); }
-                                                        Err(e) => { let _ = t.send(Err(anyhow!("decode MediaInputStatus: {e}"))); }
-                                                    }
-                                                } else {
-                                                    let msg = status.get("comment").and_then(|x| x.as_str()).unwrap_or("unknown");
-                                                    let _ = t.send(Err(anyhow!("obs status: {msg}")));
-                                                }
-                                            }
-                                            Some(PendingTask::Version(t)) => {
-                                                if status.get("result").and_then(|x| x.as_bool()).unwrap_or(false) {
-                                                    let _ = t.send(Ok(ObsVersion::from(&data)));
-                                                } else {
-                                                    let msg = status.get("comment").and_then(|x| x.as_str()).unwrap_or("unknown");
-                                                    let _ = t.send(Err(anyhow!("obs status: {msg}")));
-                                                }
-                                            }
-                                            Some(PendingTask::Ack(t)) => {
-                                                if status.get("result").and_then(|x| x.as_bool()).unwrap_or(false) {
-                                                    let _ = t.send(Ok(()));
-                                                } else {
-                                                    let msg = status.get("comment").and_then(|x| x.as_str()).unwrap_or("unknown");
-                                                    let _ = t.send(Err(anyhow!("obs ack: {msg}")));
-                                                }
-                                            }
-                                            None => { /* unknown id */ }
-                                        }
-                                    }
+                                    resolve_response(&v, &pending_recv);
                                 } else if op == 5 {
-                                    // Event; ignore for now (could route
-                                    // `MediaInputPlaybackEnded` etc. here).
                                     debug!("obs event: {}", v);
                                 } else {
                                     debug!("obs op={} msg={}", op, v);
                                 }
                             }
+                            Ok(Message::Ping(p)) => {
+                                if ws.send(Message::Pong(p)).await.is_err() { break; }
+                            }
+                            Ok(Message::Close(_)) => break,
+                            Ok(_) => {}
+                            Err(e) => { warn!("ws recv error: {e}"); break; }
                         }
-                        Ok(Message::Ping(p)) => { let _ = ws.send(Message::Pong(p)).await; }
-                        Ok(Message::Close(_)) => { break; }
-                        Ok(_) => {}
-                        Err(e) => { warn!("ws recv err: {e}"); break; }
                     }
-                }
 
-                cmd = cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { break };
-                    let id = {
-                        let mut g = id_alloc.lock();
-                        let cur = *g;
-                        *g = g.wrapping_add(1);
-                        cur
-                    };
-                    let outcome: Result<()> = match cmd {
-                        ObsWsCmd::SetInputSettings { input_name, settings, overlay, resp } => {
-                            let data = json!({
+                    // ---- outbound commands ----------------------------------
+                    cmd = cmd_rx.recv() => {
+                        let Some(cmd) = cmd else { break };
+                        let id = {
+                            let mut g = next_id.lock();
+                            let cur = *g;
+                            *g = g.wrapping_add(1);
+                            cur
+                        };
+                        let request_type = match &cmd {
+                            ObsWsCmd::SetInputSettings { .. } => "SetInputSettings",
+                            ObsWsCmd::TriggerMediaInputAction { .. } => "TriggerMediaInputAction",
+                            ObsWsCmd::GetMediaInputStatus { .. } => "GetMediaInputStatus",
+                            ObsWsCmd::GetVersion { .. } => "GetVersion",
+                        };
+                        let data = match &cmd {
+                            ObsWsCmd::SetInputSettings { input_name, settings, overlay, .. } => json!({
                                 "inputName": input_name,
                                 "settings": settings,
                                 "overlay": overlay
-                            });
-                            let r = issue(&mut ws, id, "SetInputSettings", data, &pending, PendingTask::Ack).await;
-                            match r {
-                                Ok(_) => {
-                                    let pending = pending.clone();
-                                    let (tx, rx) = oneshot::channel();
-                                    pending.lock().insert(id, PendingTask::Ack(tx));
-                                    match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                                        Ok(Ok(_)) => resp.send(Ok(())),
-                                        Ok(Err(_)) => resp.send(Err(anyhow!("ack dropped"))),
-                                        Err(_) => resp.send(Err(anyhow!("ack timeout"))),
-                                    }.ok();
-                                    Ok(())
-                                }
-                                Err(e) => {
-                                    let _ = resp.send(Err(anyhow!("send SetInputSettings: {e}")));
-                                    Err(e)
-                                }
-                            }
-                        }
-                        ObsWsCmd::TriggerMediaInputAction { input_name, action, resp } => {
-                            let data = json!({
+                            }),
+                            ObsWsCmd::TriggerMediaInputAction { input_name, action, .. } => json!({
                                 "inputName": input_name,
                                 "action": action.as_str()
-                            });
-                            let (tx, rx) = oneshot::channel();
-                            pending.lock().insert(id, PendingTask::Ack(tx));
-                            let r = send_msg(&mut ws, json!({
-                                "op": 6,
-                                "d": {
-                                    "requestId": id.to_string(),
-                                    "requestType": "TriggerMediaInputAction",
-                                    "requestData": data
-                                }
-                            })).await;
-                            if let Err(e) = r {
-                                let _ = resp.send(Err(anyhow!("send TriggerMediaInputAction: {e}")));
-                                Err(e)
-                            } else {
-                                match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                                    Ok(Ok(_)) => { let _ = resp.send(Ok(())); Ok(()) }
-                                    Ok(Err(_)) => { let _ = resp.send(Err(anyhow!("ack dropped"))); Ok(()) }
-                                    Err(_) => { let _ = resp.send(Err(anyhow!("ack timeout"))); Ok(()) }
-                                }
+                            }),
+                            ObsWsCmd::GetMediaInputStatus { input_name, .. } => json!({
+                                "inputName": input_name
+                            }),
+                            ObsWsCmd::GetVersion { .. } => Value::Null,
+                        };
+                        // Register before sending so a fast reply can't race us.
+                        match cmd {
+                            ObsWsCmd::SetInputSettings { resp, .. }
+                            | ObsWsCmd::TriggerMediaInputAction { resp, .. } => {
+                                pending.lock().insert(id, Pending::Ack(resp));
+                            }
+                            ObsWsCmd::GetMediaInputStatus { resp, .. } => {
+                                pending.lock().insert(id, Pending::Status(resp));
+                            }
+                            ObsWsCmd::GetVersion { resp } => {
+                                pending.lock().insert(id, Pending::Version(resp));
                             }
                         }
-                        ObsWsCmd::GetMediaInputStatus { input_name, resp } => {
-                            let data = json!({ "inputName": input_name });
-                            let (tx, rx) = oneshot::channel();
-                            pending.lock().insert(id, PendingTask::Status(tx));
-                            let r = send_msg(&mut ws, json!({
-                                "op": 6,
-                                "d": {
-                                    "requestId": id.to_string(),
-                                    "requestType": "GetMediaInputStatus",
-                                    "requestData": data
-                                }
-                            })).await;
-                            if let Err(e) = r {
-                                let _ = resp.send(Err(anyhow!("send GetMediaInputStatus: {e}")));
-                                Err(e)
-                            } else {
-                                match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                                    Ok(Ok(Ok(s))) => { let _ = resp.send(Ok(s)); Ok(()) }
-                                    Ok(Ok(Err(e))) => { let _ = resp.send(Err(e)); Ok(()) }
-                                    Ok(Err(_)) => { let _ = resp.send(Err(anyhow!("status dropped"))); Ok(()) }
-                                    Err(_) => { let _ = resp.send(Err(anyhow!("status timeout"))); Ok(()) }
-                                }
+                        let payload = json!({
+                            "op": 6,
+                            "d": {
+                                "requestId": id.to_string(),
+                                "requestType": request_type,
+                                "requestData": data
                             }
-                        }
-                        ObsWsCmd::GetVersion { resp } => {
-                            let (tx, rx) = oneshot::channel();
-                            pending.lock().insert(id, PendingTask::Version(tx));
-                            let r = send_msg(&mut ws, json!({
-                                "op": 6,
-                                "d": {
-                                    "requestId": id.to_string(),
-                                    "requestType": "GetVersion"
-                                }
-                            })).await;
-                            if let Err(e) = r {
-                                let _ = resp.send(Err(anyhow!("send GetVersion: {e}")));
-                                Err(e)
-                            } else {
-                                match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                                    Ok(Ok(Ok(v))) => { let _ = resp.send(Ok(v)); Ok(()) }
-                                    Ok(Ok(Err(e))) => { let _ = resp.send(Err(e)); Ok(()) }
-                                    Ok(Err(_)) => { let _ = resp.send(Err(anyhow!("version dropped"))); Ok(()) }
-                                    Err(_) => { let _ = resp.send(Err(anyhow!("version timeout"))); Ok(()) }
-                                }
+                        });
+                        if let Err(e) = send_msg(&mut ws, payload).await {
+                            warn!("ws send failed: {e}");
+                            if let Some(p) = pending.lock().remove(&id) {
+                                fail_pending(p, format!("send failed: {e}"));
                             }
+                            break;
                         }
-                    };
-                    let _ = outcome; // errors already reported via resp
+                    }
                 }
             }
+        });
+    }
+}
+
+/// Route an inbound op-7 RequestResponse to whoever is waiting on it.
+fn resolve_response(v: &Value, pending: &Arc<Mutex<HashMap<u64, Pending>>>) {
+    let Some(rid) = v
+        .get("d")
+        .and_then(|d| d.get("requestId"))
+        .and_then(|r| r.as_str())
+        .and_then(|r| r.parse::<u64>().ok())
+    else {
+        return;
+    };
+    let Some(entry) = pending.lock().remove(&rid) else {
+        return;
+    };
+    let status = v.get("d").and_then(|d| d.get("requestStatus")).cloned();
+    let ok = status
+        .as_ref()
+        .and_then(|s| s.get("result"))
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    let comment = status
+        .as_ref()
+        .and_then(|s| s.get("comment"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("unknown error")
+        .to_string();
+    let data = v
+        .get("d")
+        .and_then(|d| d.get("responseData"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    match entry {
+        Pending::Ack(tx) => {
+            let _ = if ok {
+                tx.send(Ok(()))
+            } else {
+                tx.send(Err(anyhow!("obs rejected request: {comment}")))
+            };
+        }
+        Pending::Status(tx) => {
+            let _ = if ok {
+                match serde_json::from_value::<MediaInputStatus>(data) {
+                    Ok(s) => tx.send(Ok(s)),
+                    Err(e) => tx.send(Err(anyhow!("decode MediaInputStatus: {e}"))),
+                }
+            } else {
+                tx.send(Err(anyhow!("obs rejected GetMediaInputStatus: {comment}")))
+            };
+        }
+        Pending::Version(tx) => {
+            let _ = if ok {
+                tx.send(Ok(ObsVersion::from(&data)))
+            } else {
+                tx.send(Err(anyhow!("obs rejected GetVersion: {comment}")))
+            };
         }
     }
 }
 
-impl ObsWsClient {
-    /// Configuration snapshot (useful for reconnect logic).
-    pub fn config(&self) -> &ObsWsConfig {
-        &self.cfg
+fn fail_pending(entry: Pending, msg: String) {
+    match entry {
+        Pending::Ack(tx) => {
+            let _ = tx.send(Err(anyhow!(msg)));
+        }
+        Pending::Status(tx) => {
+            let _ = tx.send(Err(anyhow!(msg)));
+        }
+        Pending::Version(tx) => {
+            let _ = tx.send(Err(anyhow!(msg)));
+        }
     }
 }
 
@@ -434,33 +365,17 @@ impl ObsWsClient {
 /* Message I/O                                                                */
 /* -------------------------------------------------------------------------- */
 
-async fn send_msg(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    payload: Value,
-) -> Result<()> {
+async fn send_msg(ws: &mut WsStream, payload: Value) -> Result<()> {
     let s = serde_json::to_string(&payload)?;
     ws.send(Message::Text(s)).await?;
     Ok(())
 }
 
-async fn send_op(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    op: u8,
-    d: Value,
-) -> Result<()> {
+async fn send_op(ws: &mut WsStream, op: u8, d: Value) -> Result<()> {
     send_msg(ws, json!({ "op": op, "d": d })).await
 }
 
-async fn recv_op(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    expected_op: u8,
-) -> Result<Value> {
+async fn recv_op(ws: &mut WsStream, expected_op: u8) -> Result<Value> {
     loop {
         let msg = ws
             .next()
@@ -485,30 +400,21 @@ async fn recv_op(
 
 fn build_identify(auth: &Value, password: Option<&str>) -> Value {
     let password = password.unwrap_or("");
-    match auth {
-        Value::Null | Value::Object(_) if password.is_empty() => {
-            json!({ "rpcVersion": 1 })
-        }
-        Value::Object(map) => {
-            let challenge = map
-                .get("challenge")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let salt = map
-                .get("salt")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let auth_str = compute_auth(challenge, salt, password);
-            json!({
-                "rpcVersion": 1,
-                "authentication": auth_str
-            })
-        }
-        _ => json!({ "rpcVersion": 1 }),
+    if password.is_empty() {
+        return json!({ "rpcVersion": 1 });
     }
+    if let Value::Object(map) = auth {
+        let challenge = map.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+        let salt = map.get("salt").and_then(|v| v.as_str()).unwrap_or("");
+        return json!({
+            "rpcVersion": 1,
+            "authentication": compute_auth(challenge, salt, password)
+        });
+    }
+    json!({ "rpcVersion": 1 })
 }
 
-/// obs-websocket 5 password hashing scheme:
+/// obs-websocket 5 password scheme:
 ///   secret_b64 = base64(sha256(password + salt))
 ///   auth       = base64(sha256(secret_b64 + challenge))
 fn compute_auth(challenge: &str, salt: &str, password: &str) -> String {
@@ -522,3 +428,8 @@ fn compute_auth(challenge: &str, salt: &str, password: &str) -> String {
     h2.update(challenge.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(h2.finalize())
 }
+
+/// Used only to keep the `Duration` import meaningful if the timeout helpers
+/// are reintroduced; harmless otherwise.
+#[allow(dead_code)]
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);

@@ -18,17 +18,7 @@ use tracing::{info, warn};
 use tvbs_engine::config::Config;
 use tvbs_engine::embedded;
 use tvbs_engine::server;
-use tvbs_engine::{obs_ws, scheduler as sched, AppState};
-
-static CONFIG_PATH: once_cell::sync::OnceLock<PathBuf> = once_cell::sync::OnceLock::new();
-
-/// Return the config path resolved at startup (used by helpers below).
-pub fn config_path() -> PathBuf {
-    CONFIG_PATH
-        .get()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("config.json"))
-}
+use tvbs_engine::{obs_ws, scheduler as sched, set_config_path, AppState};
 
 /// Directory the engine binary lives in (used for portable-mode config / logs).
 pub fn exe_dir() -> Result<PathBuf> {
@@ -93,7 +83,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg_path = resolve_config_path(cli.config.clone())?;
-    let _ = CONFIG_PATH.set(cfg_path.clone());
+    set_config_path(cfg_path.clone());
 
     info!(
         "tv-obsbroadcast-scheduler engine starting; config = {}",

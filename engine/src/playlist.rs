@@ -133,7 +133,6 @@ pub fn fmt_iso_local(ms: i64) -> String {
 mod tests {
     use super::*;
     use crate::config::ProgramKind;
-    use std::path::PathBuf;
 
     fn program(start: i64, dur: u64) -> ProgramEntry {
         ProgramEntry {
@@ -172,7 +171,4 @@ mod tests {
         assert_eq!(fmt_ms(3_661_001), "01:01:01.001");
         assert_eq!(fmt_ms(-500), "-00:00:00.500");
     }
-
-    #[allow(unused_imports)]
-    use PathBuf as _;
 }

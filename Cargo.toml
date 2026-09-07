@@ -14,7 +14,10 @@ description = "OBS Studio plugin: TV-style broadcast scheduler. Auto-swap media 
 [workspace.dependencies]
 # Runtime / async
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs", "net", "io-util"] }
-tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+# `connect` gives us `connect_async()`, which handles DNS + TCP + wss:// for
+# us; without it we'd have to hand-roll the handshake Request and hit type
+# mismatches against tungstenite's IntoClientRequest.
+tokio-tungstenite = { version = "0.23", features = ["native-tls", "connect"] }
 futures = "0.3"
 futures-util = "0.3"
 async-trait = "0.1"

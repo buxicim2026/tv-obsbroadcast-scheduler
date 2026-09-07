@@ -1,19 +1,14 @@
 # Per-workspace cargo config.
 #
-# Default Windows target: GNU (MinGW-w64). This avoids the heavy
-# Visual Studio Build Tools dependency. Override per-build via
-# `--target x86_64-pc-windows-msvc` if a developer has MSVC installed.
+# IMPORTANT: do NOT set a global `build.target` here.
 #
-# To install MinGW-w64:
-#   winget install -e --id BrechtSanders.WinLibsBuilds
-#   # or download from https://winlibs.com/ and add /mingw64/bin to PATH
+# A `build.target` in a project-level .cargo/config.toml applies to *every*
+# platform, so pinning `x86_64-pc-windows-gnu` would make Linux/macOS runners
+# (and CI) look for the Windows GNU std and fail with
+#   error[E0463]: can't find crate for `core`
 #
-# Recommended Rust toolchains for matching (already pinned in
-# rust-toolchain.toml):
-#   stable + target x86_64-pc-windows-gnu
-[build]
-target = "x86_64-pc-windows-gnu"
-
-# Same target on `cargo run` / `cargo test` for ergonomics.
-[target.x86_64-pc-windows-gnu]
-runner = "rustc"
+# Each platform should just use its host toolchain. Windows developers who
+# prefer MinGW-w64 over MSVC can opt in per-shell, e.g.:
+#   $env:CARGO_BUILD_TARGET = "x86_64-pc-windows-gnu"     (PowerShell)
+#   set CARGO_BUILD_TARGET=x86_64-pc-windows-gnu          (cmd)
+# or pass `--target x86_64-pc-windows-gnu` explicitly. See docs/README.md.

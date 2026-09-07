@@ -9,7 +9,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use tvbs_engine::AppState;
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct BootstrapPayload {
@@ -52,7 +52,7 @@ pub async fn bootstrap(
 
     // Best-effort: persist to disk now so a crash right after bootstrap still
     // preserves the credentials.
-    let path = tvbs_engine::config_path();
+    let path = crate::config_path();
     let cfg = state.config.read().clone();
     if let Err(e) = cfg.save_atomic(&path) {
         let msg = format!("persist bootstrap config: {:#}", e);

@@ -18,9 +18,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use tvbs_engine::AppState;
-
 use crate::embedded::DistAssets;
+use crate::AppState;
 
 pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
     let api = Router::new()

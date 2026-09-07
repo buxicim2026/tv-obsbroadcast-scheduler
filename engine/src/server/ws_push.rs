@@ -17,7 +17,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 
-use tvbs_engine::AppState;
+use crate::AppState;
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
