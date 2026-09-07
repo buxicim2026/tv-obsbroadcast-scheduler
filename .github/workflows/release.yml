@@ -54,8 +54,16 @@ jobs:
             target
           key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
+      # Cross-compiling to aarch64-unknown-linux-gnu on an x86_64 runner
+      # needs an aarch64 C linker (build scripts / proc-macros link it).
+      - name: Install Linux cross toolchain (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Build engine
         run: cargo build --release --manifest-path engine/Cargo.toml --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package artifacts
         shell: bash
