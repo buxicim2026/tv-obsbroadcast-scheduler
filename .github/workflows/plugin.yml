@@ -76,7 +76,12 @@ jobs:
           $names = @($raw |
             Select-String -Pattern '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+[A-Za-z_]\S*' |
             ForEach-Object { ($_.Line.Trim() -split '\s+' | Select-Object -Last 1) } |
-            Where-Object { $_ })
+            Where-Object { $_ } |
+            # obs.dll also exports CRT-reserved runtime stubs (e.g.
+            # __scrt_stub_for_is_c_termination_complete); synthesizing them
+            # into obs.lib makes the plugin link collide with MSVCRT.lib
+            # (LNK2005 multiply defined). No real OBS API starts with "__".
+            Where-Object { $_ -notlike '__*' })
           if ($names.Count -eq 0) {
             Write-Host "--- dumpbin output (first 40 lines) ---"
             $raw | Select-Object -First 40 | Write-Host
