@@ -95,7 +95,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.archive }}
-          path: out/${{ matrix.archive }}.*
+          # Archives are named engine-<archive>.* by the packaging step above.
+          path: out/engine-${{ matrix.archive }}.*
 
   release:
     name: publish release
