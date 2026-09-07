@@ -41,6 +41,7 @@ pub async fn connect(config: ObsWsConfig) -> anyhow::Result<Arc<ObsWsClient>> {
 }
 
 /// Shared handle that the rest of the engine uses to interact with OBS.
+#[derive(Clone)]
 pub struct ClientHandle {
     inner: Arc<Mutex<Option<Arc<ObsWsClient>>>>,
     last_attempt: Arc<Mutex<Option<DateTime<Utc>>>>,

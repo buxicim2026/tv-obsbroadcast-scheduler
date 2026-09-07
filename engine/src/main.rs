@@ -122,8 +122,12 @@ async fn main() -> Result<()> {
             loop {
                 if let Some(client) = handle.current() {
                     let scheduler = sched::Scheduler::new(client, target_input.clone());
-                    scheduler.run(state_for_tasks.clone()).await;
-                    // unreachable: scheduler.run is an infinite loop.
+                    // `run` is defined as `self: Arc<Self>`, so it must be
+                    // called through an Arc.
+                    Arc::new(scheduler)
+                        .run(state_for_tasks.clone())
+                        .await;
+                    // Unreachable in practice: `run` never returns.
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
