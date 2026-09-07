@@ -14,6 +14,8 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
+#else
+#include <unistd.h> /* getpid / srandom / random (non-Windows) */
 #endif
 
 #include "plugin.h"

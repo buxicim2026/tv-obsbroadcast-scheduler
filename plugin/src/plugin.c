@@ -9,7 +9,6 @@
 
 #include <obs-module.h>
 #include <util/platform.h>
-#include <util/threading.h>
 
 #include <stdio.h>
 #include <stdlib.h>

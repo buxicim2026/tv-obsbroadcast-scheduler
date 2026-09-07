@@ -18,7 +18,6 @@
 #include <stdbool.h>
 #include <obs-module.h>
 #include <util/platform.h>
-#include <util/threading.h>
 
 #ifdef _WIN32
 #include <winsock2.h>

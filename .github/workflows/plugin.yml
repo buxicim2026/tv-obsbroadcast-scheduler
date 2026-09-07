@@ -116,18 +116,22 @@ jobs:
           OUT="dist/tv-obsbroadcast-scheduler-${{ matrix.archive }}"
           rm -rf "$OUT"
           mkdir -p "$OUT/engine" "$OUT/data/locale"
+          # Engine is built via `cargo build --manifest-path engine/Cargo.toml`,
+          # but engine/ is a workspace member, so Cargo puts artifacts in the
+          # WORKSPACE root target/, i.e. <repo>/target/release/ — not
+          # engine/target/.
           if [[ "${{ matrix.os }}" == windows-* ]]; then
             cp plugin/build/Release/tv-obsbroadcast-scheduler.dll "$OUT/"
-            cp engine/target/release/tv-obsbroadcast-scheduler.exe "$OUT/engine/"
+            cp target/release/tv-obsbroadcast-scheduler.exe "$OUT/engine/"
             (cd dist && 7z a "${{ matrix.archive }}.zip" "$(basename $OUT)")
           elif [[ "${{ matrix.os }}" == macos-* ]]; then
             cp plugin/build/Release/tv-obsbroadcast-scheduler.so "$OUT/" || \
             cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
-            cp engine/target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
+            cp target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
             (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
           else
             cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/"
-            cp engine/target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
+            cp target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
             (cd dist && tar czf "${{ matrix.archive }}.tar.gz" "$(basename $OUT)")
           fi
 
