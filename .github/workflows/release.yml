@@ -27,9 +27,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: linux-arm64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: macos-x64
+          # Intel macOS (x86_64-apple-darwin) needs the macos-13 runner, whose
+          # free-tier queue is extremely long; re-added once GitHub's macOS
+          # runner availability improves (tracked in README).
           - target: aarch64-apple-darwin
             os: macos-14
             archive: macos-arm64

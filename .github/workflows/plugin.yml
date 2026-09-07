@@ -27,9 +27,8 @@ jobs:
           - os: windows-2022
             archive: windows-x64
             experimental: true
-          - os: macos-13
-            archive: macos-x64
-            experimental: false
+          # Intel macOS (macos-13) runner queue on free tier is extremely
+          # long; skipped here, re-added when runner availability improves.
           - os: macos-14
             archive: macos-arm64
             experimental: false
