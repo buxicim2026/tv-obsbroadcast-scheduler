@@ -18,14 +18,18 @@ pub struct DistAssets;
 
 impl DistAssets {
     pub fn admin(&self) -> Option<&'static Dir<'static>> {
-        if ADMIN_DIR.files().is_empty() {
+        // `files()` returns an iterator (no `is_empty`), and the iterator
+        // borrows the Dir, so resolve it to a bool before returning `&Dir`.
+        let empty = ADMIN_DIR.files().next().is_none();
+        if empty {
             None
         } else {
             Some(&ADMIN_DIR)
         }
     }
     pub fn overlay(&self) -> Option<&'static Dir<'static>> {
-        if OVERLAY_DIR.files().is_empty() {
+        let empty = OVERLAY_DIR.files().next().is_none();
+        if empty {
             None
         } else {
             Some(&OVERLAY_DIR)

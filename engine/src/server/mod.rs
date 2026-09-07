@@ -22,6 +22,10 @@ use crate::embedded::DistAssets;
 use crate::AppState;
 
 pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
+    // Both routers must carry the *same* state type to be merged, and /ws
+    // needs `State<Arc<AppState>>` — so share one Arc across both.
+    let shared = Arc::new(state);
+
     let api = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/api/status", get(schedule_api::status))
@@ -35,18 +39,19 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
             "/api/scheduler/enable",
             post(schedule_api::enable_scheduler),
         )
-        .with_state(Arc::new(state));
+        .route("/ws", get(ws_push::ws_handler))
+        .with_state(shared.clone());
 
     let root = Router::new()
         .route("/", get(index))
-        .route("/ws", get(ws_push::ws_handler))
+        .with_state(shared)
         .merge(api)
         .layer(
             tower::ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .layer(SetResponseHeaderLayer::overriding(
                     axum::http::header::CACHE_CONTROL,
-                    "no-store",
+                    axum::http::HeaderValue::from_static("no-store"),
                 ))
                 .layer(
                     CorsLayer::new()

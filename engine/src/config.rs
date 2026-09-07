@@ -126,6 +126,31 @@ impl Default for MissingFilePolicy {
     }
 }
 
+/// `#[serde(default)]` on `Config`'s fields requires every field type to
+/// implement `Default`, and we want the *sensible* defaults here (not
+/// `host: ""`, `port: 0`), so implement it by hand instead of deriving.
+impl Default for ObsWsConfig {
+    fn default() -> Self {
+        Self {
+            host: default_obs_host(),
+            port: default_obs_port(),
+            password: None,
+            tls: false,
+        }
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            lead_in_ms: default_lead_in_ms(),
+            clock_offset_ms: 0,
+            enabled: false,
+            on_missing_file: MissingFilePolicy::default(),
+        }
+    }
+}
+
 impl Config {
     pub fn load_or_init(path: &Path) -> Result<Self> {
         if path.exists() {
@@ -165,14 +190,14 @@ impl Config {
 }
 
 fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value::*;
+    use serde_json::Value;
     match (&mut base, &patch) {
-        (Object(a), Object(b)) => {
+        (Value::Object(a), Value::Object(b)) => {
             for (k, v) in b {
                 let cur = a.remove(k).unwrap_or(Value::Null);
                 a.insert(k.clone(), merge_json(cur, v.clone()));
             }
-            Object(a.clone())
+            Value::Object(a.clone())
         }
         _ => patch,
     }

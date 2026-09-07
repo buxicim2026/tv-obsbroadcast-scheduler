@@ -154,7 +154,9 @@ mod tests {
         cfg.playlist.items.push(program(1000, 1000));
         assert_eq!(current_program(&cfg, 500).map(|p| p.start_at_ms), Some(0));
         assert_eq!(current_program(&cfg, 1500).map(|p| p.start_at_ms), Some(1000));
-        assert_eq!(current_program(&cfg, 999_999), None);
+        // ProgramEntry has no PartialEq (and doesn't need one), so assert on
+        // the Option directly rather than comparing against `None`.
+        assert!(current_program(&cfg, 999_999).is_none());
     }
 
     #[test]

@@ -1,8 +1,11 @@
 //! Global engine status snapshot — surfaced via `/api/status` and `/ws`.
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Default)]
+/// Serializable so handlers can drop it straight into a JSON response /
+/// WebSocket frame.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AppStatus {
     /// True if the engine has a working connection to OBS via WebSocket.
     pub obs_connected: bool,
