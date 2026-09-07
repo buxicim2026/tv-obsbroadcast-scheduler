@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "platform.h"
+#include "../plugin.h" /* TVBS_LOG_TAG logging macro */
 
 extern char **environ;
 

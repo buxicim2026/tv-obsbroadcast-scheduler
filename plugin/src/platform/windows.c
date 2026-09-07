@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "platform.h"
+#include "../plugin.h" /* TVBS_LOG_TAG logging macro */
 
 static HANDLE g_job = NULL;
 

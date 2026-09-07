@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "platform.h"
+#include "../plugin.h" /* TVBS_LOG_TAG logging macro */
 
 #ifndef __APPLE__
 /* macOS uses posix_spawn; see platform/bsd.c. */
