@@ -53,6 +53,16 @@ set_target_properties(tv-obsbroadcast-scheduler PROPERTIES
   OUTPUT_NAME "tv-obsbroadcast-scheduler"
 )
 
+# Windows: keep <windows.h> from pulling in <winsock.h> (OBS headers do
+# include windows.h, and any winsock2.h that comes afterwards would then
+# redefine sockaddr/fd_set/timeval etc.). All socket code uses winsock2.h.
+if(WIN32)
+  target_compile_definitions(tv-obsbroadcast-scheduler PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+  )
+endif()
+
 if(WIN32)
   target_link_libraries(tv-obsbroadcast-scheduler PRIVATE ws2_32)
   if(OBS_IMPORT_LIB)
@@ -66,7 +76,8 @@ elseif(APPLE)
   find_package(Threads REQUIRED)
   target_link_libraries(tv-obsbroadcast-scheduler PRIVATE Threads::Threads)
   target_link_options(tv-obsbroadcast-scheduler PRIVATE "-undefined" "dynamic_lookup")
-  set_target_properties(tv-obsbroadcast-scheduler PROPERTIES SUFFIX "")
+  # MODULE library keeps the .so suffix on macOS too (OBS loads .so plugins);
+  # do NOT set SUFFIX "" here — the packaging step copies *.so.
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(tv-obsbroadcast-scheduler PRIVATE Threads::Threads)

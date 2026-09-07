@@ -5,8 +5,8 @@
 
 #ifdef _WIN32
 
+#include <winsock2.h> /* MUST precede windows.h (winsock redefinition) */
 #include <windows.h>
-#include <winsock2.h>
 
 #include <stdio.h>
 #include <stdlib.h>
