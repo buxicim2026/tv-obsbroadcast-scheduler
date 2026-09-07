@@ -147,3 +147,4 @@ jobs:
           files: artifacts/**/*
           generate_release_notes: true
           draft: false
+          prerelease: ${{ startsWith(github.ref, 'refs/tags/v0.') || contains(github.ref_name, '-') }}

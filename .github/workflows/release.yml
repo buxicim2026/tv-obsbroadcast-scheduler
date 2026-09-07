@@ -91,3 +91,5 @@ jobs:
           files: artifacts/**/*
           generate_release_notes: true
           draft: false
+          # Pre-release for 0.x tags and any pre-release suffix (v1.0.0-rc.1)
+          prerelease: ${{ startsWith(github.ref, 'refs/tags/v0.') || contains(github.ref_name, '-') }}
