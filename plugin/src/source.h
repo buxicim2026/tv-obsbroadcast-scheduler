@@ -15,7 +15,27 @@
 #ifndef TVBS_SOURCE_H
 #define TVBS_SOURCE_H
 
+#include <stdbool.h>
 #include <obs-module.h>
+
+/* --------------------------------------------------------------------------
+ * Per-source private data.
+ *
+ * Defined in the header (not privately in source.c) because the properties
+ * panel (source_properties.c) also needs to read these fields to forward
+ * settings to the engine via /api/bootstrap.
+ * ------------------------------------------------------------------------ */
+struct tvbs_source_data {
+    /* Cached copies of the latest settings; used to detect changes that
+     * need forwarding to the engine. */
+    char *target_input;
+    char *ws_host;
+    int   ws_port;
+    char *ws_password;
+    bool  ws_tls;
+    bool  scheduler_enabled;
+    char *bootstrap_secret;  /* shared secret issued by the plugin */
+};
 
 /* Register the input source kind with libobs. */
 void tvbs_source_register(void);

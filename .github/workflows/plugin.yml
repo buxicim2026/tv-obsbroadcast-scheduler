@@ -70,11 +70,18 @@ jobs:
 
           # dumpbin /exports prints rows like:
           #     1    0 00001234 obs_frontend_add_event_callback
-          $raw = dumpbin /exports "$dll"
-          $names = $raw |
-            Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$' |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
-          if ($names.Count -eq 0) { throw "no exports parsed from $dll" }
+          # Be lenient on leading whitespace / trailing CR so different
+          # dumpbin output flavours all parse.
+          $raw = @(dumpbin /exports "$dll" 2>&1)
+          $names = @($raw |
+            Select-String -Pattern '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+[A-Za-z_]\S*' |
+            ForEach-Object { ($_.Line.Trim() -split '\s+' | Select-Object -Last 1) } |
+            Where-Object { $_ })
+          if ($names.Count -eq 0) {
+            Write-Host "--- dumpbin output (first 40 lines) ---"
+            $raw | Select-Object -First 40 | Write-Host
+            throw "no exports parsed from $dll"
+          }
 
           Set-Content -Encoding Ascii -Path obs.def -Value "EXPORTS"
           Add-Content -Encoding Ascii -Path obs.def -Value $names

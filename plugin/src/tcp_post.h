@@ -9,6 +9,7 @@
 #ifndef TVBS_TCP_POST_H
 #define TVBS_TCP_POST_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef _WIN32

@@ -15,6 +15,7 @@
 #ifndef TVBS_PLUGIN_H
 #define TVBS_PLUGIN_H
 
+#include <stdbool.h>
 #include <obs-module.h>
 #include <util/platform.h>
 #include <util/threading.h>

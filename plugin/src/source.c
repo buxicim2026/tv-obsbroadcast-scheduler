@@ -18,21 +18,8 @@
 #include "source_properties.h"
 #include "tcp_post.h"
 
-/* --------------------------------------------------------------------------
- * Per-source private data
- * ------------------------------------------------------------------------ */
-
-struct tvbs_source_data {
-    /* Cached copies of the latest settings; used to detect changes that
-     * need forwarding to the engine. */
-    char *target_input;
-    char *ws_host;
-    int   ws_port;
-    char *ws_password;
-    bool  ws_tls;
-    bool  scheduler_enabled;
-    char *bootstrap_secret;  /* shared secret issued by the plugin */
-};
+/* `struct tvbs_source_data` is defined in source.h (shared with the
+ * properties panel which must read its fields). */
 
 static const char *source_get_name(void *unused)
 {

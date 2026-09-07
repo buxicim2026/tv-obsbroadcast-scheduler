@@ -5,6 +5,7 @@
 #ifndef TVBS_ENGINE_PROC_H
 #define TVBS_ENGINE_PROC_H
 
+#include <stdbool.h>
 #include <obs-module.h>
 #include <util/platform.h>
 
