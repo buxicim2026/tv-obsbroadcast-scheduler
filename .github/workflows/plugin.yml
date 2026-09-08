@@ -1,4 +1,10 @@
-name: Build OBS plugin packages
+name: Build OBS script package
+
+# Packages the OBS Lua script frontend together with the Rust engine binary.
+#
+# The frontend is an OBS *script* (Lua), not a native binary module, so this
+# job needs no OBS SDK headers, no cmake, no obs.lib synthesis — it just
+# copies the .lua plus the engine binary into a zip/tar.gz.
 
 on:
   push:
@@ -10,28 +16,22 @@ permissions:
   contents: write
 
 jobs:
-  plugin:
-    name: plugin (${{ matrix.os }})
+  script:
+    name: script (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows needs an obs.lib synthesized from a real OBS install (choco +
-    # dumpbin), which is environment-sensitive; mark it experimental so a
-    # failure there doesn't hide Linux / macOS results.
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             archive: linux-x64
-            experimental: false
           - os: windows-2022
             archive: windows-x64
-            experimental: true
-          # Intel macOS (macos-13) runner queue on free tier is extremely
-          # long; skipped here, re-added when runner availability improves.
+          # Intel macOS (macos-13) is skipped: the free-tier runner queue is
+          # hours deep. The Lua script itself is portable; only the engine
+          # binary is arch-specific, so add macos-13 back when available.
           - os: macos-14
             archive: macos-arm64
-            experimental: false
     steps:
       - uses: actions/checkout@v4
 
@@ -41,148 +41,38 @@ jobs:
       - name: Build Rust engine
         run: cargo build --release --manifest-path engine/Cargo.toml
 
-      - name: Fetch OBS Studio source (${{ matrix.os }})
+      - name: Assemble script bundle
         shell: bash
         run: |
-          OBS_TAG="30.0.2"
-          git clone --depth 1 --branch ${OBS_TAG} https://github.com/obsproject/obs-studio.git obs-src
-          echo "LIBOBS_INCLUDE_DIR=$(pwd)/obs-src/libobs" >> $GITHUB_ENV
-
-      # MSVC on the runner has no import library for obs.dll, so we build one:
-      # install OBS -> dumpbin /exports -> obs.def -> lib /def -> obs.lib.
-      - name: Set up MSVC dev environment (Windows)
-        if: matrix.os == 'windows-2022'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Generate obs.lib (Windows only)
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
-        run: |
-          choco install obs-studio -y --no-progress
-          $dll = @(
-            "C:\Program Files\obs-studio\bin\64bit\obs.dll",
-            "C:\Program Files (x86)\obs-studio\bin\64bit\obs.dll"
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $dll) { throw "obs.dll not found after installing obs-studio" }
-
-          # dumpbin /exports prints rows like:
-          #     1    0 00001234 obs_frontend_add_event_callback
-          # Be lenient on leading whitespace / trailing CR so different
-          # dumpbin output flavours all parse.
-          $raw = @(dumpbin /exports "$dll" 2>&1)
-          $names = @($raw |
-            Select-String -Pattern '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+[A-Za-z_]\S*' |
-            ForEach-Object { ($_.Line.Trim() -split '\s+' | Select-Object -Last 1) } |
-            Where-Object { $_ } |
-            # obs.dll also exports CRT-reserved runtime stubs (e.g.
-            # __scrt_stub_for_is_c_termination_complete); synthesizing them
-            # into obs.lib makes the plugin link collide with MSVCRT.lib
-            # (LNK2005 multiply defined). No real OBS API starts with "__".
-            Where-Object { $_ -notlike '__*' })
-          if ($names.Count -eq 0) {
-            Write-Host "--- dumpbin output (first 40 lines) ---"
-            $raw | Select-Object -First 40 | Write-Host
-            throw "no exports parsed from $dll"
-          }
-
-          Set-Content -Encoding Ascii -Path obs.def -Value "EXPORTS"
-          Add-Content -Encoding Ascii -Path obs.def -Value $names
-          lib /def:obs.def /out:obs.lib /machine:x64
-          if (-not (Test-Path obs.lib)) { throw "obs.lib generation failed" }
-          Write-Host "generated obs.lib with $($names.Count) exports"
-
-      - name: Build C plugin
-        shell: bash
-        run: |
-          mkdir -p plugin/build
-          if [[ "${{ matrix.os }}" == windows-* ]]; then
-            cmake -S plugin -B plugin/build -G "Visual Studio 17 2022" -A x64 \
-              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR" \
-              -DOBS_IMPORT_LIB="$(pwd)/obs.lib"
-          elif [[ "${{ matrix.os }}" == macos-* ]]; then
-            cmake -S plugin -B plugin/build -G "Xcode" \
-              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR"
-          else
-            # Linux: create a stub libobs.so with soname libobs.so.0
-            gcc -shared -Wl,-soname,libobs.so.0 -o libobs.so.0 -nostdlib /dev/null
-            ln -sf libobs.so.0 libobs.so
-            cmake -S plugin -B plugin/build \
-              -DLIBOBS_INCLUDE_DIR="$LIBOBS_INCLUDE_DIR" \
-              -DOBS_STUB_LIB="$(pwd)/libobs.so"
-          fi
-          cmake --build plugin/build --config Release
-
-      # Guard against the silent failure mode where the DLL compiles and links
-      # fine but exports no module entry points — OBS then simply cannot load
-      # the plugin and the source never appears in "Add Source".
-      - name: Verify plugin exports (Windows)
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
-        run: |
-          $dll = "plugin/build/Release/tv-obsbroadcast-scheduler.dll"
-          $raw = @(dumpbin /exports "$dll" 2>&1) | Out-String
-          foreach ($sym in @('obs_module_load', 'obs_module_ver', 'obs_module_set_pointer')) {
-            if ($raw -notmatch $sym) {
-              Write-Host "--- dumpbin output ---"
-              Write-Host $raw.Substring(0, [Math]::Min(4000, $raw.Length))
-              throw "plugin DLL does not export $sym - OBS would fail to load it"
-            }
-            Write-Host "exported: $sym"
-          }
-
-      - name: Assemble bundle (OBS plugin layout)
-        shell: bash
-        run: |
-          # OBS loads user-installed plugins from:
-          #   Windows: %APPDATA%\obs-studio\plugins\<module>\bin\64bit\*.dll
-          #   Linux:   ~/.config/obs-studio/plugins/<module>/bin/64bit/*.so
-          #   macOS:   ~/Library/Application Support/obs-studio/plugins/<module>/bin/*.so
-          # and reads locale from <module>/data/locale/*.ini.
-          #
-          # The Rust engine goes to <module>/data/engine/ because
-          # obs_get_module_data_path() returns <module>/data and the C plugin
-          # spawns "<data_dir>/engine/<binary>".
-          #
-          # Engine artifacts: `cargo build --manifest-path engine/Cargo.toml`
-          # puts them in the WORKSPACE root target/release/ (engine/ is a
-          # workspace member), NOT engine/target/.
+          # Layout the user gets after unzipping:
+          #   tv_obsbroadcast_scheduler.lua      <- load this in OBS
+          #   engine/tv-obsbroadcast-scheduler*  <- spawned by the script
           OUT="dist/tv-obsbroadcast-scheduler"
           rm -rf "$OUT"
-          mkdir -p "$OUT/data/locale" "$OUT/data/engine"
-          cp plugin/data/locale/*.ini "$OUT/data/locale/"
-
+          mkdir -p "$OUT/engine"
+          cp obs-script/tv_obsbroadcast_scheduler.lua "$OUT/"
+          cp plugin-c-legacy/data/locale/*.ini "$OUT/locale/" 2>/dev/null || true
+          # engine/ is a workspace member, so cargo writes to <repo>/target/release/
           if [[ "${{ matrix.os }}" == windows-* ]]; then
-            mkdir -p "$OUT/bin/64bit"
-            cp plugin/build/Release/tv-obsbroadcast-scheduler.dll "$OUT/bin/64bit/"
-            cp target/release/tv-obsbroadcast-scheduler.exe "$OUT/data/engine/"
+            cp target/release/tv-obsbroadcast-scheduler.exe "$OUT/engine/"
             (cd dist && 7z a "tv-obsbroadcast-scheduler-${{ matrix.archive }}.zip" "tv-obsbroadcast-scheduler")
-          elif [[ "${{ matrix.os }}" == macos-* ]]; then
-            mkdir -p "$OUT/bin"
-            cp plugin/build/Release/tv-obsbroadcast-scheduler.so "$OUT/bin/" || \
-              cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/bin/"
-            cp target/release/tv-obsbroadcast-scheduler "$OUT/data/engine/"
-            (cd dist && tar czf "tv-obsbroadcast-scheduler-${{ matrix.archive }}.tar.gz" "tv-obsbroadcast-scheduler")
           else
-            mkdir -p "$OUT/bin/64bit"
-            cp plugin/build/tv-obsbroadcast-scheduler.so "$OUT/bin/64bit/"
-            cp target/release/tv-obsbroadcast-scheduler "$OUT/data/engine/"
+            cp target/release/tv-obsbroadcast-scheduler "$OUT/engine/"
             (cd dist && tar czf "tv-obsbroadcast-scheduler-${{ matrix.archive }}.tar.gz" "tv-obsbroadcast-scheduler")
           fi
           find "$OUT" -type f | sort
 
-      - name: Upload plugin artifact
+      - name: Upload script artifact
         uses: actions/upload-artifact@v4
         with:
-          name: plugin-${{ matrix.archive }}
+          name: script-${{ matrix.archive }}
           path: |
             dist/*.zip
             dist/*.tar.gz
 
   release:
-    name: publish plugin packages
-    needs: plugin
+    name: publish script packages
+    needs: script
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
