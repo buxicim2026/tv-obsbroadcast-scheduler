@@ -77,7 +77,9 @@ struct Cli {
     audio_mode: Option<String>,
 }
 
-#[tokio::main]
+// The engine is IO-bound and tiny: two worker threads are plenty and keep
+// the resident footprint (thread stacks) small next to OBS itself.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     init_tracing();
 
@@ -110,7 +112,11 @@ async fn main() -> Result<()> {
             // The connector keeps trying with backoff; we just wait on its
             // side-channel and start the scheduler when a client is up.
             let handle = obs_ws::ClientHandle::new();
-            tokio::spawn(obs_ws::resilient_connector(cfg_obs.clone(), handle.clone()));
+            tokio::spawn(obs_ws::resilient_connector(
+                cfg_obs.clone(),
+                handle.clone(),
+                state_for_tasks.clone(),
+            ));
 
             // Wait for the first successful connect.
             loop {

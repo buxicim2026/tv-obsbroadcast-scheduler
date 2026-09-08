@@ -15,6 +15,7 @@
 //! behind an `Arc`. Every transition writes the machine *and* mirrors the
 //! human-readable label into `AppStatus` for the UI.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,10 @@ use crate::config::{Config, MissingFilePolicy, ProgramEntry};
 use crate::obs_ws::{MediaInputAction, ObsWsClient};
 
 const TICK_MS: u64 = 50;
+
+/// Throttle for the "program vanished from the playlist" warning: without it
+/// the scheduler emitted ~20 identical warnings per second forever.
+static LAST_MISSING_WARN: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SchedulerState {
@@ -96,16 +101,26 @@ impl Scheduler {
 
         let mut tick = interval(Duration::from_millis(TICK_MS));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Rebuild the config snapshot about once per second instead of on
+        // every 50ms tick. Cloning `Config` deep-copies every playlist item
+        // and bumper (all their Strings); doing that 20x/s was pure
+        // allocation churn with no behavioural benefit.
+        let mut ticks: u64 = 0;
+        let mut cfg_snapshot = Arc::new(state.config.read().clone());
+        let mut prev_active = false;
+        let mut error_since: Option<i64> = None;
         loop {
             tick.tick().await;
+            ticks += 1;
+            if ticks % 20 == 0 {
+                cfg_snapshot = Arc::new(state.config.read().clone());
+            }
             // Snapshot config so we don't hold the lock across awaits.
-            let (cfg_snapshot, want_running) = {
-                let cfg = state.config.read();
-                (
-                    cfg.clone(),
-                    cfg.scheduler.enabled && matches!(state.status.read().obs_connected, true),
-                )
-            };
+            // Take the two locks one at a time (never nested) to keep the
+            // lock ordering consistent with the rest of the engine.
+            let enabled = state.config.read().scheduler.enabled;
+            let connected = state.status.read().obs_connected;
+            let want_running = enabled && connected;
             if !want_running {
                 if machine.is_active() {
                     self.become_idle(&state, &mut machine);
@@ -115,6 +130,36 @@ impl Scheduler {
 
             // Run a single tick under a deterministic state evolution.
             self.tick_once(&state, &cfg_snapshot, &mut machine).await;
+
+            // Mirror "is the scheduler actively driving" into AppStatus — it
+            // was never written before, so the UI always showed it idle.
+            let active = machine.is_active();
+            if active != prev_active {
+                prev_active = active;
+                let mut st = state.status.write();
+                st.scheduler_running = active;
+                st.scheduler_state = machine.label().to_string();
+            }
+
+            // Auto-recover from a sticky error. `SchedulerState::Error` had no
+            // clearing endpoint, so a single transient failure (missing file,
+            // one failed RPC) froze the broadcast forever with no way back
+            // except restarting the engine.
+            if matches!(machine, SchedulerState::Error { .. }) {
+                let now = Utc::now().timestamp_millis();
+                let since = *error_since.get_or_insert(now);
+                if now - since > 10_000 {
+                    warn!("scheduler stuck in Error for >10s; resetting to Idle");
+                    machine = SchedulerState::Idle;
+                    error_since = None;
+                    let mut st = state.status.write();
+                    st.scheduler_running = false;
+                    st.scheduler_state = "Idle".to_string();
+                    prev_active = false;
+                }
+            } else {
+                error_since = None;
+            }
         }
     }
 
@@ -168,11 +213,17 @@ impl Scheduler {
                 let started = *started_at_ms;
 
                 let Some(p) = cfg.playlist.items.iter().find(|p| p.id == program_id) else {
-                    // Program was deleted from the playlist while on air. Hold.
-                    warn!(
-                        "current program id={} no longer exists; holding",
-                        program_id
-                    );
+                    // Program was deleted from the playlist while on air. Hold,
+                    // but log at most once every 5s instead of every tick.
+                    let now = Utc::now().timestamp_millis();
+                    let last = LAST_MISSING_WARN.load(Ordering::Relaxed);
+                    if now - last > 5_000 {
+                        LAST_MISSING_WARN.store(now, Ordering::Relaxed);
+                        warn!(
+                            "current program id={} no longer exists; holding",
+                            program_id
+                        );
+                    }
                     return;
                 };
 

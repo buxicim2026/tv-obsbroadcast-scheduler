@@ -77,24 +77,46 @@ impl Default for ClientHandle {
 /// Resilient connector: tries to (re)connect with exponential backoff.
 /// Drives `ClientHandle::set` on success so other components can pick up the
 /// new client without restarting.
-pub async fn resilient_connector(cfg: ObsWsConfig, handle: ClientHandle) {
+pub async fn resilient_connector(cfg: ObsWsConfig, handle: ClientHandle, state: crate::AppState) {
     let mut backoff_ms = 500u64;
     let max_backoff_ms = 30_000u64;
     loop {
         handle.mark_attempt(Utc::now());
         match connect(cfg.clone()).await {
             Ok(client) => {
-                handle.set(client);
+                handle.set(client.clone());
                 backoff_ms = 500;
-                // wait until the client reports disconnected; if it dies the
-                // connector will respawn a new one.
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                // Mirror the connection state into AppStatus — the scheduler
+                // gates every tick on `obs_connected`, so leaving it false
+                // meant the scheduler never advanced at all.
+                {
+                    let mut st = state.status.write();
+                    st.obs_connected = true;
+                    st.obs_error = None;
+                }
+                info!("obs-websocket connected; holding until it drops");
+                // Block until THIS client dies (OBS quit / network drop)
+                // rather than reconnecting on a fixed 60s timer: the timer
+                // churned a fresh TCP+WS connection every minute while the
+                // previous one was still held alive by the scheduler.
+                client.closed().await;
+                {
+                    let mut st = state.status.write();
+                    st.obs_connected = false;
+                    st.obs_error = Some("obs websocket disconnected".to_string());
+                }
+                warn!("obs-websocket disconnected; reconnecting");
             }
             Err(e) => {
                 warn!(
                     "obs-websocket connect failed: {} (retry in {} ms)",
                     e, backoff_ms
                 );
+                {
+                    let mut st = state.status.write();
+                    st.obs_connected = false;
+                    st.obs_error = Some(format!("{e}"));
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
             }

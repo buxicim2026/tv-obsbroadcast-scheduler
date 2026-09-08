@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, warn};
@@ -70,6 +70,9 @@ pub struct ObsWsClient {
     cfg: ObsWsConfig,
     cmd_tx: mpsc::Sender<ObsWsCmd>,
     next_id: Arc<Mutex<u64>>,
+    /// Signalled when the background socket task ends, so the connector can
+    /// reconnect immediately instead of polling blindly.
+    closed: Arc<Notify>,
 }
 
 impl ObsWsClient {
@@ -106,9 +109,16 @@ impl ObsWsClient {
             cfg: cfg.clone(),
             cmd_tx,
             next_id: Arc::new(Mutex::new(1)),
+            closed: Arc::new(Notify::new()),
         });
         client.spawn(cmd_rx, ws);
         Ok(client)
+    }
+
+    /// Resolves once the background socket task has ended (OBS closed the
+    /// connection, a fatal protocol error, or OBS restarted).
+    pub async fn closed(&self) {
+        self.closed.notified().await;
     }
 
     fn alloc_id(&self) -> u64 {
@@ -192,6 +202,7 @@ impl ObsWsClient {
         let pending: Arc<Mutex<HashMap<u64, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
         let next_id = self.next_id.clone();
         let pending_recv = pending.clone();
+        let closed = self.closed.clone();
 
         tokio::spawn(async move {
             loop {
@@ -283,6 +294,16 @@ impl ObsWsClient {
                     }
                 }
             }
+            // Socket/task ended. Fail every request still awaiting a reply,
+            // otherwise their callers hang forever on the oneshot (and the
+            // scheduler would silently stop advancing).
+            {
+                let mut p = pending_recv.lock();
+                for (_, entry) in p.drain() {
+                    fail_pending(entry, "obs websocket connection closed".to_string());
+                }
+            }
+            closed.notify_waiters();
         });
     }
 }

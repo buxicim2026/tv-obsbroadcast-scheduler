@@ -16,6 +16,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::AppState;
 
@@ -25,7 +26,10 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 
 async fn ws_loop(mut socket: WebSocket, state: Arc<AppState>) {
     let mut notify_rx = state.notify.subscribe();
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    // Never "catch up" on missed ticks: a stalled client would otherwise get
+    // a burst of snapshots (wasted CPU + memory churn).
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await; // skip immediate
 
     loop {
@@ -40,7 +44,16 @@ async fn ws_loop(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             n = notify_rx.recv() => {
-                let _ = n;
+                match n {
+                    Ok(_) => {}
+                    // `Lagged` returns immediately: without yielding, select!
+                    // would spin on this branch and hammer the socket.
+                    Err(RecvError::Lagged(_)) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(RecvError::Closed) => return,
+                }
                 if socket
                     .send(Message::Text(snapshot(&state).to_string()))
                     .await
