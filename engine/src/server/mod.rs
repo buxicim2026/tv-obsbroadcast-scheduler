@@ -17,7 +17,7 @@ use axum::{
     Router,
 };
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, Any, CorsLayer},
     set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
@@ -125,8 +125,18 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
                     axum::http::HeaderValue::from_static("no-store"),
                 ))
                 .layer(
+                    // Only the machine itself. `allow_origin(Any)` let any
+                    // web page a broadcaster visited talk to the engine (the
+                    // write endpoints are also token-guarded now).
                     CorsLayer::new()
-                        .allow_origin(Any)
+                        .allow_origin(AllowOrigin::predicate(|origin, _| {
+                            let v = origin.to_str().unwrap_or("");
+                            v.starts_with("http://127.0.0.1")
+                                || v.starts_with("http://localhost")
+                                || v.starts_with("https://127.0.0.1")
+                                || v.starts_with("https://localhost")
+                                || v == "null"
+                        }))
                         .allow_methods(Any)
                         .allow_headers(Any),
                 ),

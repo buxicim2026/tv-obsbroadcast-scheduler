@@ -29,7 +29,9 @@ pub fn ready_to_fire(
         .any(|b| {
             let offset = b.at_into_program_ms as i64;
             // Same window as the inter-cut: anywhere in [offset - lead_in, offset).
-            now_ms_into_program >= offset - lead_in_ms as i64 && now_ms_into_program < offset
+            // saturating_sub: a huge lead_in must not wrap the timestamp.
+            now_ms_into_program >= offset.saturating_sub(lead_in_ms as i64)
+                && now_ms_into_program < offset
         })
 }
 
@@ -42,7 +44,9 @@ pub fn return_to_ms(b: &BumperEntry) -> u64 {
 
 /// How long the primary still has to run after the bumper finished.
 pub fn remaining_after_bumper(p: &ProgramEntry, b: &BumperEntry) -> i64 {
-    (p.declared_duration_ms as i64 - b.at_into_program_ms as i64).max(0)
+    (p.declared_duration_ms as i64)
+        .saturating_sub(b.at_into_program_ms as i64)
+        .max(0)
 }
 
 /// Resolve the bumper's content file (or skip if missing / wrong kind).
@@ -129,7 +133,7 @@ pub fn recover<'a>(cfg: &'a Config, now_ms: i64) -> Option<Resume<'a>> {
     }
     // Case 2 — we missed the last program already.
     let next = crate::playlist::next_program(cfg, now_ms)?;
-    let gap = next.start_at_ms - now_ms;
+    let gap = next.start_at_ms.saturating_sub(now_ms);
     if gap > 24 * 60 * 60 * 1000 {
         Some(Resume::FastForward(next))
     } else {

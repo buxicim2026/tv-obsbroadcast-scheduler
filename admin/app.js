@@ -89,10 +89,23 @@ async function refreshAll() {
     }
 }
 
+// Write endpoints are guarded by the engine (see schedule_api::require_token)
+// and expect the bootstrap token, which the status snapshot carries.
+function authHeaders() {
+    const token =
+        (lastSnapshot && lastSnapshot.bootstrap_token) ||
+        window.__TVBS_TOKEN__ ||
+        '';
+    return {
+        'Content-Type': 'application/json',
+        'X-Bootstrap-Token': token,
+    };
+}
+
 async function apiPost(url, body) {
     const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -102,7 +115,7 @@ async function apiPost(url, body) {
 async function apiDelete(url, body) {
     const res = await fetch(url, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

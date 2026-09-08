@@ -9,11 +9,36 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{app_status::AppStatus, AppState};
+
+/// Mutation guard. The engine listens on loopback, but a browser page from
+/// ANY origin could still drive it (the CORS layer used to allow every
+/// origin), so writes require the bootstrap token the UI already knows.
+///
+/// If no token has been issued yet (fresh install, before the first
+/// bootstrap) there is nothing to protect and the UI must be able to
+/// initialise, so we let it through.
+fn require_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    let expected = match state.config.read().bootstrap_token.clone() {
+        Some(t) if !t.is_empty() => t,
+        _ => return Ok(()),
+    };
+    let provided = headers
+        .get("X-Bootstrap-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided != expected {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid X-Bootstrap-Token".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 pub struct UpsertItem {
@@ -55,8 +80,10 @@ pub async fn get_playlist(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 pub async fn upsert_item(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(item): Json<UpsertItem>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
     let entry = crate::config::ProgramEntry {
         id: item.id.clone(),
         name: item.name,
@@ -83,8 +110,10 @@ pub async fn upsert_item(
 
 pub async fn delete_item(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<DeleteItem>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
     {
         let mut cfg = state.config.write();
         cfg.playlist.items.retain(|p| p.id != payload.id);
@@ -99,8 +128,10 @@ pub async fn delete_item(
 
 pub async fn enable_scheduler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<EnableScheduler>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
     {
         let mut cfg = state.config.write();
         cfg.scheduler.enabled = payload.enabled;

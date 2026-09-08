@@ -26,13 +26,16 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::config::{Config, MissingFilePolicy, ProgramEntry};
-use crate::obs_ws::{MediaInputAction, ObsWsClient};
+use crate::obs_ws::{ClientHandle, MediaInputAction, ObsWsClient};
 
 const TICK_MS: u64 = 50;
 
 /// Throttle for the "program vanished from the playlist" warning: without it
 /// the scheduler emitted ~20 identical warnings per second forever.
 static LAST_MISSING_WARN: AtomicI64 = AtomicI64::new(0);
+
+/// Throttle for media duration probing (at most one probe attempt per 5s).
+static LAST_PROBE_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SchedulerState {
@@ -41,10 +44,13 @@ pub enum SchedulerState {
     /// Will fire `SetInputSettings(target_input, next)` at `fire_at_ms`.
     Armed { target_id: String, fire_at_ms: i64 },
     /// Currently driving a program. `started_at_ms` is when this program
-    /// began playing.
+    /// began playing and `end_at_ms` is the absolute wall-clock time it is
+    /// considered over (an explicit value, because a bumper that replays the
+    /// primary from the top shifts the real end time).
     Playing {
         program_id: String,
         started_at_ms: i64,
+        end_at_ms: i64,
     },
     /// A bumper is on air in the middle of `primary_id`. When it ends we cut
     /// back to the primary at `return_to_ms` (its offset inside the primary).
@@ -83,13 +89,21 @@ impl SchedulerState {
 /// Stateless scheduler driver. Holds only the OBS handle + target input name;
 /// the live `SchedulerState` lives in `run()` (see module docs).
 pub struct Scheduler {
-    pub obs: Arc<ObsWsClient>,
+    /// A *handle*, not a client: obs-websocket reconnects produce a new
+    /// client, and holding one `Arc<ObsWsClient>` forever meant the scheduler
+    /// kept talking to a dead socket after OBS restarted.
+    pub obs: ClientHandle,
     pub target_input: String,
 }
 
 impl Scheduler {
-    pub fn new(obs: Arc<ObsWsClient>, target_input: String) -> Self {
+    pub fn new(obs: ClientHandle, target_input: String) -> Self {
         Self { obs, target_input }
+    }
+
+    /// Current live OBS client, or `None` while disconnected.
+    fn client(&self) -> Option<Arc<ObsWsClient>> {
+        self.obs.current()
     }
 
     /// Public entry — called from main.rs once we have an obs-ws handle.
@@ -194,9 +208,30 @@ impl Scheduler {
                         }
                     }
                     if now_ms >= p.start_at_ms {
-                        if let Err(e) = self.cut_to(p).await {
-                            self.transition_to_error(state, &format!("cut: {e}"), machine);
-                            return;
+                        match self.cut_to(cfg, p).await {
+                            Ok(true) => {
+                                // Missing file + SkipToNext: don't start it,
+                                // re-arm for the following program.
+                                warn!("skipping missing program {} ({})", p.name, p.file_path);
+                                match crate::playlist::next_program(
+                                    cfg,
+                                    p.start_at_ms.saturating_add(1),
+                                ) {
+                                    Some(next) => {
+                                        let fire_at = next
+                                            .start_at_ms
+                                            .saturating_sub(cfg.scheduler.lead_in_ms as i64);
+                                        self.transition_to_armed(state, next, fire_at, machine);
+                                    }
+                                    None => self.become_idle(state, machine),
+                                }
+                                return;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                self.transition_to_error(state, &format!("cut: {e}"), machine);
+                                return;
+                            }
                         }
                         self.begin_playing(state, cfg, p, now_ms, machine).await;
                     }
@@ -208,9 +243,11 @@ impl Scheduler {
             SchedulerState::Playing {
                 program_id,
                 started_at_ms,
+                end_at_ms,
             } => {
                 let program_id = program_id.clone();
                 let started = *started_at_ms;
+                let end = *end_at_ms;
 
                 let Some(p) = cfg.playlist.items.iter().find(|p| p.id == program_id) else {
                     // Program was deleted from the playlist while on air. Hold,
@@ -227,10 +264,15 @@ impl Scheduler {
                     return;
                 };
 
-                let elapsed = now_ms - started;
-                let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
-                let into_program_ms = (now_ms - p.start_at_ms).max(0);
+                let elapsed = now_ms.saturating_sub(started);
+                let into_program_ms = now_ms.saturating_sub(p.start_at_ms).max(0);
                 let lead_in = cfg.scheduler.lead_in_ms;
+
+                // First time this program airs: once OBS has the file open,
+                // read the real duration back so the UI can show it.
+                if p.detected_duration_ms.is_none() && into_program_ms > 1500 {
+                    self.probe_duration(state, p).await;
+                }
 
                 // ---- Bumper detection -------------------------------------
                 if crate::interrupt::ready_to_fire(
@@ -250,7 +292,11 @@ impl Scheduler {
                                 "firing bumper {} at +{}ms into {}",
                                 content.name, into_program_ms, p.name
                             );
-                            match crate::interrupt::trigger_bumper(&self.obs, &self.target_input, b)
+                            let Some(client) = self.client() else {
+                                warn!("bumper skipped: no obs-websocket connection");
+                                return;
+                            };
+                            match crate::interrupt::trigger_bumper(&client, &self.target_input, b)
                                 .await
                             {
                                 Ok(()) => {
@@ -279,7 +325,9 @@ impl Scheduler {
                     match crate::playlist::next_program(cfg, now_ms) {
                         Some(next) => {
                             self.preload_if_soon(next, cfg, now_ms);
-                            let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
+                            let fire_at = next
+                                .start_at_ms
+                                .saturating_sub(cfg.scheduler.lead_in_ms as i64);
                             self.transition_to_armed(state, next, fire_at, machine);
                         }
                         None => {
@@ -289,7 +337,7 @@ impl Scheduler {
                         }
                     }
                 } else {
-                    self.refresh_remaining(state, p, end - now_ms);
+                    self.refresh_remaining(state, p, end.saturating_sub(now_ms));
                 }
             }
             SchedulerState::InterstitialPlaying {
@@ -311,30 +359,39 @@ impl Scheduler {
                 };
 
                 let bumper_dur = b.content.declared_duration_ms as i64;
-                let bumper_start_ms = p.start_at_ms + b.at_into_program_ms as i64;
-                let bumper_end_ms = bumper_start_ms + bumper_dur;
+                let bumper_start_ms = p.start_at_ms.saturating_add(b.at_into_program_ms as i64);
+                let bumper_end_ms = bumper_start_ms.saturating_add(bumper_dur);
 
                 if now_ms >= bumper_end_ms {
+                    let Some(client) = self.client() else {
+                        warn!("resume primary skipped: no obs-websocket connection");
+                        return;
+                    };
                     if let Err(e) =
-                        crate::interrupt::trigger_resume_primary(&self.obs, &self.target_input, p)
+                        crate::interrupt::trigger_resume_primary(&client, &self.target_input, p)
                             .await
                     {
                         warn!("resume primary failed: {e}");
                     }
-                    // The bumper replaced the tail of the primary starting at
-                    // `at_into_program_ms`; resuming there means the primary
-                    // has (declared - at_into_program_ms) left to play.
-                    let primary_remaining = crate::interrupt::remaining_after_bumper(p, b);
+                    // obs-websocket has no "seek" action for a Media Source,
+                    // so resuming the primary restarts it from the top. That
+                    // means the FULL declared duration is still ahead of us,
+                    // and the end time moves out by the same amount — using
+                    // `remaining_after_bumper` here desynced the state machine
+                    // from what OBS was actually playing.
+                    let primary_declared = p.declared_duration_ms as i64;
+                    let end_at = now_ms.saturating_add(primary_declared);
                     self.transition_to_playing(
                         state,
                         &p.id,
                         &p.name,
-                        primary_remaining,
+                        primary_declared,
                         now_ms,
+                        end_at,
                         machine,
                     );
                 } else {
-                    self.refresh_remaining(state, p, bumper_end_ms - now_ms);
+                    self.refresh_remaining(state, p, bumper_end_ms.saturating_sub(now_ms));
                 }
             }
             SchedulerState::Error { .. } => {
@@ -412,6 +469,7 @@ impl Scheduler {
         program_name: &str,
         remaining_ms: i64,
         now_ms: i64,
+        end_at_ms: i64,
         machine: &mut SchedulerState,
     ) {
         self.apply_state(
@@ -420,6 +478,7 @@ impl Scheduler {
             SchedulerState::Playing {
                 program_id: program_id.to_string(),
                 started_at_ms: now_ms,
+                end_at_ms,
             },
         );
         let mut st = state.status.write();
@@ -460,7 +519,15 @@ impl Scheduler {
     ) {
         debug!("begin_playing {} now={}", p.name, now_ms);
         let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
-        self.transition_to_playing(state, &p.id, &p.name, end - now_ms, now_ms, machine);
+        self.transition_to_playing(
+            state,
+            &p.id,
+            &p.name,
+            end.saturating_sub(now_ms),
+            now_ms,
+            end,
+            machine,
+        );
     }
 
     fn refresh_remaining(&self, state: &crate::AppState, p: &ProgramEntry, remaining_ms: i64) {
@@ -468,6 +535,33 @@ impl Scheduler {
         st.current_program_id = Some(p.id.clone());
         st.current_program_name = Some(p.name.clone());
         st.current_remaining_ms = Some(remaining_ms);
+    }
+
+    /// Ask OBS how long the file really is and store it on the playlist entry.
+    /// `media_probe` existed but was never called, so `detected_duration_ms`
+    /// stayed empty forever.
+    async fn probe_duration(&self, state: &crate::AppState, p: &ProgramEntry) {
+        let now = Utc::now().timestamp_millis();
+        if now - LAST_PROBE_MS.load(Ordering::Relaxed) < 5_000 {
+            return;
+        }
+        LAST_PROBE_MS.store(now, Ordering::Relaxed);
+
+        let Some(client) = self.client() else {
+            return;
+        };
+        let Some(dur) =
+            crate::media_probe::probe_duration_ms(&client, &self.target_input).await
+        else {
+            return;
+        };
+        let mut cfg = state.config.write();
+        if let Some(entry) = cfg.playlist.items.iter_mut().find(|e| e.id == p.id) {
+            entry.detected_duration_ms = Some(dur);
+            info!("probed duration for {}: {}ms", entry.name, dur);
+        }
+        drop(cfg);
+        let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     }
 
     /* ------------------------- obs RPC wrappers ------------------------- */
@@ -486,13 +580,16 @@ impl Scheduler {
             "speed_percent": 100,
             "clear_on_media_end": false
         });
-        self.obs
+        let client = self
+            .client()
+            .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
+        client
             .set_input_settings(&self.target_input, settings, true)
             .await
     }
 
     async fn preload_if_soon(&self, p: &ProgramEntry, cfg: &Config, now_ms: i64) {
-        let fire_at = p.start_at_ms - cfg.scheduler.lead_in_ms as i64;
+        let fire_at = p.start_at_ms.saturating_sub(cfg.scheduler.lead_in_ms as i64);
         if now_ms >= fire_at && now_ms < p.start_at_ms {
             if let Err(e) = self.preload(p).await {
                 warn!("preload ahead-of-fire failed for {}: {}", p.name, e);
@@ -500,27 +597,33 @@ impl Scheduler {
         }
     }
 
-    async fn cut_to(&self, p: &ProgramEntry) -> anyhow::Result<()> {
+    /// Hard-cut to `p`.
+    ///
+    /// Returns `Ok(true)` when the media file is missing and the configured
+    /// policy is `SkipToNext` — i.e. the caller should NOT start this program
+    /// and should re-arm for the next one instead. The policy used to be
+    /// hard-coded, which made HoldFrame / StopScheduler dead settings.
+    async fn cut_to(&self, cfg: &Config, p: &ProgramEntry) -> anyhow::Result<bool> {
         if !std::path::Path::new(&p.file_path).exists() {
-            return match _missing_policy() {
-                MissingFilePolicy::SkipToNext => Ok(()),
+            return match cfg.scheduler.on_missing_file {
+                MissingFilePolicy::SkipToNext => Ok(true),
                 MissingFilePolicy::HoldFrame => Err(anyhow::anyhow!(
                     "missing file and policy=HoldFrame: {}",
                     p.file_path
                 )),
-                MissingFilePolicy::StopScheduler => {
-                    Err(anyhow::anyhow!("missing file: {}", p.file_path))
-                }
+                MissingFilePolicy::StopScheduler => Err(anyhow::anyhow!(
+                    "missing file and policy=StopScheduler: {}",
+                    p.file_path
+                )),
             };
         }
-        self.obs
+        let client = self
+            .client()
+            .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
+        client
             .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
             .await?;
         debug!("triggered RESTART on {}", self.target_input);
-        Ok(())
+        Ok(false)
     }
-}
-
-fn _missing_policy() -> MissingFilePolicy {
-    MissingFilePolicy::SkipToNext
 }

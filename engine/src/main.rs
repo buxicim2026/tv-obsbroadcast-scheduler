@@ -120,8 +120,10 @@ async fn main() -> Result<()> {
 
             // Wait for the first successful connect.
             loop {
-                if let Some(client) = handle.current() {
-                    let scheduler = sched::Scheduler::new(client, target_input.clone());
+                if handle.current().is_some() {
+                    // Pass the handle (not a client) so a later reconnect is
+                    // picked up instead of sticking with a dead socket.
+                    let scheduler = sched::Scheduler::new(handle.clone(), target_input.clone());
                     // `run` is defined as `self: Arc<Self>`, so it must be
                     // called through an Arc.
                     Arc::new(scheduler).run(state_for_tasks.clone()).await;

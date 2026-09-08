@@ -15,7 +15,7 @@ use crate::config::{BumperEntry, Config, ProgramEntry, ProgramKind, SchedulerCon
 /// time base (e.g. broadcast clock).
 pub fn effective_now_ms(cfg: &SchedulerConfig) -> i64 {
     let raw = Utc::now().timestamp_millis();
-    raw + cfg.clock_offset_ms
+    raw.saturating_add(cfg.clock_offset_ms)
 }
 
 /// `now_ms` falls in `[start_at_ms, start_at_ms + declared_duration_ms)`.
