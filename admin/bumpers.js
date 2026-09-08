@@ -25,8 +25,11 @@ export function renderBumpers(bumpers) {
             <div class="font-bold text-sm mb-1">${escapeHtml(b.content.name)}</div>
             <div class="text-xs text-muted">@ +${(b.at_into_program_ms / 1000).toFixed(1)}s · ${msToHM(b.content.declared_duration_ms)}</div>`;
         card.addEventListener('click', () => {
-            // trigger bumper via REST (stub — endpoint added by `c-plugin-properties` todo)
-            alert('插播触发：' + b.content.name + '\n（实际调 POST /api/bumper/<id>/fire）');
+            // trigger bumper via REST (endpoint arrives in the next engine
+            // iteration — surface it in the activity log instead of a modal)
+            window.dispatchEvent(new CustomEvent('tvbs:log', {
+                detail: `插播触发：${b.content.name}（引擎 /api/bumper/… 端点将在下一版本提供）`,
+            }));
         });
         list.appendChild(card);
     });

@@ -67,7 +67,26 @@ pub struct EnableScheduler {
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cfg = state.config.read().clone();
     let st = state.status.read().clone();
-    Json(merge_into_value(&cfg, &st))
+    Json(snapshot_value(&cfg, &st))
+}
+
+/// One canonical status shape shared by `GET /api/status` and the `/ws`
+/// snapshot. The admin UI reads `scheduler` as the **runtime** scheduler
+/// state (AppStatus) — a plain `merge_into_value` used to put the scheduler
+/// *config* there instead, so every dashboard value came back empty/undefined.
+fn snapshot_value(cfg: &crate::config::Config, st: &AppStatus) -> Value {
+    json!({
+        "kind": "snapshot",
+        // Runtime scheduler state (what the UI renders).
+        "scheduler": st,
+        // Scheduler settings (lead-in / clock offset / missing-file policy).
+        "scheduler_cfg": cfg.scheduler,
+        "obs_ws": cfg.obs_ws,
+        "target_input": cfg.target_input,
+        "bootstrap_token": cfg.bootstrap_token,
+        "playlist_size": cfg.playlist.items.len(),
+        "bumpers_size": cfg.playlist.bumpers.len(),
+    })
 }
 
 pub async fn get_playlist(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -151,17 +170,4 @@ async fn persist(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")))?;
     Ok(())
-}
-
-fn merge_into_value(cfg: &crate::config::Config, st: &AppStatus) -> Value {
-    let cfg_value = serde_json::to_value(cfg).unwrap_or(Value::Null);
-    let mut out = json!({"status": st});
-    if let Value::Object(map) = cfg_value {
-        if let Value::Object(o) = &mut out {
-            for (k, v) in map {
-                o.insert(k, v);
-            }
-        }
-    }
-    out
 }

@@ -22,6 +22,19 @@ pub struct BootstrapPayload {
     pub password: Option<String>,
     pub tls: bool,
     pub target_input: String,
+    /// Optional scheduler settings the admin panel can save in one call.
+    #[serde(default)]
+    pub scheduler: Option<SchedulerPatch>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SchedulerPatch {
+    #[serde(default)]
+    pub lead_in_ms: Option<u64>,
+    #[serde(default)]
+    pub clock_offset_ms: Option<i64>,
+    #[serde(default)]
+    pub on_missing_file: Option<crate::config::MissingFilePolicy>,
 }
 
 pub async fn bootstrap(
@@ -48,6 +61,17 @@ pub async fn bootstrap(
         cfg.obs_ws.password = payload.password.clone();
         cfg.obs_ws.tls = payload.tls;
         cfg.target_input = payload.target_input.clone();
+        if let Some(s) = payload.scheduler {
+            if let Some(v) = s.lead_in_ms {
+                cfg.scheduler.lead_in_ms = v;
+            }
+            if let Some(v) = s.clock_offset_ms {
+                cfg.scheduler.clock_offset_ms = v;
+            }
+            if let Some(v) = s.on_missing_file {
+                cfg.scheduler.on_missing_file = v;
+            }
+        }
     }
 
     // Best-effort: persist to disk now so a crash right after bootstrap still

@@ -7,6 +7,12 @@
 //! Connecting to OBS is wrapped in `resilient_connector` so a transient
 //! disconnect (OBS restart, server-side bounce) auto-recovers with backoff.
 
+// Windows: link as a GUI (windowless) binary so launching it from the OBS Lua
+// script (`start "" /B ...`) never pops a console window. Without this the
+// engine is a console-subsystem exe and every OBS start flashes a black cmd
+// window that lingers when it crashes or writes to stdout.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

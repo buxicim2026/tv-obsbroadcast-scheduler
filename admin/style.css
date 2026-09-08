@@ -403,3 +403,48 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* --------------------------------- footer -------------------------------- */
 footer { color: var(--muted); }
+
+/* ============================ polish (v0.1.0) ============================ */
+/* Snappier button feedback — every click visibly responds. */
+.btn:active,
+.nav-tab:active {
+    transform: translateY(1px) scale(0.97);
+}
+.btn { transition: filter 120ms ease, background 120ms ease, transform 80ms ease; }
+
+/* Breathing "ON AIR" light while the scheduler is running. */
+@keyframes tvbs-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px 2px rgba(255, 59, 48, 0.45); }
+    50%      { opacity: 0.55; box-shadow: 0 0 2px 0 rgba(255, 59, 48, 0.2); }
+}
+.status-dot,
+#on-air-dot {
+    transition: background 200ms ease, box-shadow 200ms ease;
+}
+.status-dot.pulse,
+#on-air-dot.pulse {
+    animation: tvbs-pulse 1.6s ease-in-out infinite;
+}
+
+/* Big countdown gets an amber→red urgency tint. */
+#dash-remaining {
+    transition: color 300ms ease;
+    text-shadow: 0 0 18px rgba(52, 211, 153, 0.35);
+}
+
+/* Activity log: readable scrollbar + success tint line. */
+#dash-log {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+#dash-log::-webkit-scrollbar { width: 6px; }
+#dash-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Import row + file button readability. */
+#btn-import-open { cursor: pointer; }
+
+/* Keep tooltips readable over the dark surface. */
+[title] { cursor: help; }
+
+/* Pill states smooth out. */
+.pill { transition: color 150ms ease, background 150ms ease, border-color 150ms ease; }

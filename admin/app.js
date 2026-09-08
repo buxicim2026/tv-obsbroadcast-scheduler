@@ -4,8 +4,8 @@
 // switched via the top nav. A live WebSocket keeps the dashboard in sync
 // with the engine; mutated settings go back via REST.
 
-import { initTimeline, renderTimeline } from './timeline.js';
-import { renderBumpers } from './bumpers.js';
+import { initTimeline, renderTimeline } from '/admin/timeline.js';
+import { renderBumpers } from '/admin/bumpers.js';
 
 const API = {
     status: '/api/status',
@@ -79,6 +79,7 @@ async function refreshAll() {
         playlistCache = playlist.items || [];
         renderStatus(status);
         renderDashboard(status);
+        renderSettingsForm();
         renderPlaylistRows();
         renderBumpers(playlist.bumpers || []);
         if (!document.querySelector('[data-tab="timeline"]').classList.contains('hidden')) {
@@ -132,8 +133,10 @@ function renderDashboard(s) {
                   sch.scheduler_state === 'Interstitial';
     document.getElementById('dash-on-air-dot')?.classList.toggle('bg-red-500', onAir);
     document.getElementById('dash-on-air-dot')?.classList.toggle('bg-zinc-700', !onAir);
+    document.getElementById('dash-on-air-dot')?.classList.toggle('pulse', onAir);
     document.getElementById('on-air-dot')?.classList.toggle('opacity-30', !onAir);
     document.getElementById('on-air-dot')?.classList.toggle('shadow-red-glow', onAir);
+    document.getElementById('on-air-dot')?.classList.toggle('pulse', onAir);
 
     document.getElementById('dash-program-name').textContent =
         sch.current_program_name || '— 待机 —';
@@ -182,11 +185,25 @@ function clearUpcoming() {
 
 function setupDashboardActions() {
     document.getElementById('btn-armed').addEventListener('click', toggleArmed);
-    document.getElementById('btn-pause').addEventListener('click', () => log('暂停（stub）'));
-    document.getElementById('btn-next').addEventListener('click', () => log('跳到下一档（stub）'));
-    document.getElementById('btn-restart').addEventListener('click', () => refreshAll());
+    document.getElementById('btn-pause').addEventListener('click', () => {
+        log('暂停功能将在下一版本接通（引擎侧 /api/scheduler/pause）');
+    });
+    document.getElementById('btn-next').addEventListener('click', () => {
+        log('跳到下一档将在下一版本接通（引擎侧 /api/scheduler/next）');
+    });
+    document.getElementById('btn-restart').addEventListener('click', async () => {
+        const b = document.getElementById('btn-restart');
+        b.disabled = true;
+        b.textContent = '刷新中…';
+        await refreshAll();
+        b.disabled = false;
+        b.textContent = '重新载入';
+    });
     document.getElementById('btn-clear-log').addEventListener('click', () => {
         document.getElementById('dash-log').innerHTML = '';
+    });
+    document.getElementById('btn-manage-bumpers').addEventListener('click', () => {
+        document.querySelector('.nav-tab[data-tab="timeline"]')?.click();
     });
 }
 
@@ -248,6 +265,99 @@ function setupPlaylistAdd() {
             log(`add failed: ${e}`);
         }
     });
+
+    // Bulk-import a playlist file (JSON or TSV/TXT). Kept local — nothing is
+    // uploaded to a server, rows are upserted one-by-one through the same
+    // authenticated REST endpoint the "+" button uses.
+    const importBtn = document.getElementById('btn-import-open');
+    const fileInput = document.getElementById('playlist-import');
+    if (importBtn && fileInput) {
+        importBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', async () => {
+            const file = fileInput.files && fileInput.files[0];
+            fileInput.value = '';
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const rows = parsePlaylistFile(file.name, text);
+                if (!rows.length) {
+                    log(`导入文件「${file.name}」里没解析到任何节目行`);
+                    return;
+                }
+                let ok = 0;
+                const base = Date.now();
+                for (let i = 0; i < rows.length; i++) {
+                    const r = rows[i];
+                    // If the file does not provide absolute start times, lay
+                    // the rows back-to-back from +60 s so the playlist is
+                    // immediately drivable.
+                    const start = r.start_at_ms != null
+                        ? r.start_at_ms
+                        : base + 60_000 + i * (r.declared_duration_ms || 30 * 60 * 1000);
+                    try {
+                        await apiPost(API.playlistItem, {
+                            id: cryptoRandomId(),
+                            name: r.name,
+                            file_path: r.file_path,
+                            start_at_ms: start,
+                            declared_duration_ms: r.declared_duration_ms || 30 * 60 * 1000,
+                            kind: r.kind || 'primary',
+                        });
+                        ok++;
+                    } catch (e) {
+                        log(`导入第 ${i + 1} 条失败（${r.name}）：${e}`);
+                    }
+                }
+                log(`✅ 导入完成：成功 ${ok}/${rows.length} 条（${file.name}）`);
+                await refreshAll();
+            } catch (e) {
+                log(`导入失败：${e}`);
+            }
+        });
+    }
+}
+
+// Parse a playlist file into {name,file_path,start_at_ms?,declared_duration_ms?,kind?}[].
+function parsePlaylistFile(name, raw) {
+    const lower = (name || '').toLowerCase();
+    const text = raw.replace(/\r\n/g, '\n').replace(/^\uFEFF/, '');
+    if (lower.endsWith('.json')) {
+        const j = JSON.parse(text);
+        const arr = Array.isArray(j) ? j : (j.items || []);
+        return arr
+            .map(x => ({
+                name: String(x.name ?? '').trim(),
+                file_path: String(x.file_path ?? x.path ?? '').trim(),
+                start_at_ms: x.start_at_ms != null ? Number(x.start_at_ms) : null,
+                declared_duration_ms: x.declared_duration_ms != null ? Number(x.declared_duration_ms) : 30 * 60 * 1000,
+                kind: x.kind || 'primary',
+            }))
+            .filter(x => x.name && x.file_path);
+    }
+    // Plain text / TSV: one program per line, `name<TAB>path`. If there is no
+    // tab, split on the first space-delimited run of '|' or the first 2+ spaces.
+    return text
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#'))
+        .map((line, i) => {
+            let sep = line.indexOf('\t');
+            if (sep < 0) {
+                const pipe = line.indexOf('|');
+                if (pipe >= 0) {
+                    sep = pipe;
+                    line = line.slice(0, pipe) + '\t' + line.slice(pipe + 1);
+                } else {
+                    const m = line.match(/^(\S+)\s+(.+)$/);
+                    if (m) { sep = m[1].length + 1; }
+                }
+            }
+            const name = (sep > 0 ? line.slice(0, sep) : line).trim();
+            const path = (sep > 0 ? line.slice(sep + 1) : '').trim();
+            if (!name || !path) return null;
+            return { name, file_path: path, start_at_ms: null, declared_duration_ms: 30 * 60 * 1000, kind: 'primary' };
+        })
+        .filter(Boolean);
 }
 
 function renderPlaylistRows() {
@@ -291,29 +401,74 @@ function setupSettings() {
     document.getElementById('cfg-test').addEventListener('click', testCfg);
 }
 
+// The engine's token is what the OBS Lua script generated on first launch;
+// the admin reads it back from /api/status so every write is authorised.
+function engineToken() {
+    return (lastSnapshot && lastSnapshot.bootstrap_token) || '';
+}
+
+// Copy the latest engine state into the Settings form. Only overwrite fields
+// the user is NOT currently editing, so typing isn't clobbered by polls.
+function renderSettingsForm() {
+    const snap = lastSnapshot;
+    if (!snap || !snap.obs_ws) return;
+    const active = document.activeElement;
+    const setVal = (id, val, guard) => {
+        if (active && active.id === id) return; // user typing in this field
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+    };
+    setVal('cfg-host', snap.obs_ws.host || '127.0.0.1');
+    setVal('cfg-port', snap.obs_ws.port != null ? snap.obs_ws.port : 4455);
+    setVal('cfg-password', snap.obs_ws.password || '');
+    const tlsEl = document.getElementById('cfg-tls');
+    if (tlsEl && active && active.id !== 'cfg-tls') tlsEl.checked = !!snap.obs_ws.tls;
+    setVal('cfg-target-input', snap.target_input || '');
+    const sc = snap.scheduler_cfg || {};
+    setVal('cfg-lead-in', sc.lead_in_ms != null ? sc.lead_in_ms : 200);
+    setVal('cfg-clock-offset', sc.clock_offset_ms != null ? sc.clock_offset_ms : 0);
+    setVal('cfg-missing-policy', sc.on_missing_file || 'skip_to_next');
+}
+
 async function saveCfg() {
+    const token = engineToken();
     const payload = {
+        bootstrap_token: token,
         host: document.getElementById('cfg-host').value,
         port: parseInt(document.getElementById('cfg-port').value, 10) || 4455,
         password: document.getElementById('cfg-password').value,
         tls: document.getElementById('cfg-tls').checked,
         target_input: document.getElementById('cfg-target-input').value,
+        scheduler: {
+            lead_in_ms: parseInt(document.getElementById('cfg-lead-in').value, 10) || 200,
+            clock_offset_ms: parseInt(document.getElementById('cfg-clock-offset').value, 10) || 0,
+            on_missing_file: document.getElementById('cfg-missing-policy').value,
+        },
     };
-    document.getElementById('cfg-status').textContent = '保存中…';
+    const status = document.getElementById('cfg-status');
+    status.textContent = '保存中…';
     try {
-        // Reuse bootstrap endpoint; the engine merges + persists.
-        await fetch('/api/bootstrap', {
+        const res = await fetch('/api/bootstrap', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                bootstrap_token: window.__TVBS_TOKEN__ || '',
-                ...payload,
-            }),
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Bootstrap-Token': token,
+            },
+            body: JSON.stringify(payload),
         });
-        document.getElementById('cfg-status').textContent = '已保存 ✓';
-        setTimeout(() => { document.getElementById('cfg-status').textContent = ''; }, 3000);
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            status.textContent = `保存失败 (HTTP ${res.status})${body.error ? '：' + body.error : ''}`;
+            log(`设置保存失败: HTTP ${res.status} ${body.error || ''}`);
+            return;
+        }
+        status.textContent = '已保存 ✓（调度器重读配置）';
+        log('设置已保存');
+        setTimeout(() => { status.textContent = ''; }, 4000);
+        refreshAll();
     } catch (e) {
-        document.getElementById('cfg-status').textContent = `错误：${e}`;
+        status.textContent = `错误：${e}`;
+        log(`设置保存出错：${e}`);
     }
 }
 
@@ -367,10 +522,15 @@ function log(msg) {
     if (!ol) return;
     const li = document.createElement('li');
     li.className = 'flex items-start gap-2';
-    li.innerHTML = `<span class="text-muted">${new Date().toLocaleTimeString()}</span><span>${escapeHtml(msg)}</span>`;
+    const s = String(msg);
+    const isErr = /失败|错误|拒绝|401|500|not|err/i.test(s) && !/成功/.test(s);
+    li.innerHTML = `<span class="text-muted">${new Date().toLocaleTimeString()}</span>` +
+        `<span class="${isErr ? 'text-red' : ''}">${escapeHtml(s)}</span>`;
     ol.prepend(li);
     while (ol.children.length > 200) ol.removeChild(ol.lastChild);
 }
+// Cross-module log channel (used by bumpers.js etc.).
+window.addEventListener('tvbs:log', (ev) => log(ev.detail));
 
 function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => (

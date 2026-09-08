@@ -9,7 +9,7 @@
       typography) lives in style.css and uses the OS font stack, so the
       admin page works on an air-gapped broadcast machine.
     -->
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="/admin/style.css" />
 </head>
 <body class="bg-bg text-fg font-sans antialiased">
 
@@ -116,6 +116,14 @@
                     <input id="playlist-add-path" placeholder="本地视频文件路径" class="form-input w-96" />
                     <button class="btn btn-primary" id="btn-add-program">新增节目</button>
                 </div>
+                <div class="flex items-center gap-2 mt-3">
+                    <button class="btn btn-secondary" id="btn-import-open">📂 导入节目表</button>
+                    <span class="text-muted text-xs">
+                        JSON：<code>{"items":[{"name","file_path","start_at_ms","declared_duration_ms","kind"}]}</code>；
+                        TXT：每行 <code>节目名&nbsp;TAB&nbsp;视频路径</code>（+60s 开播 / 30 分钟时长）
+                    </span>
+                    <input type="file" id="playlist-import" accept=".json,.txt" hidden />
+                </div>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm">
@@ -208,9 +216,9 @@
 </main>
 
 <footer class="px-6 py-4 text-muted text-xs text-center">
-    v0.1.0 · OBS Broadcast Scheduler · <a href="./overlay/index.html" target="_blank" class="text-emerald-400 hover:underline">打开浮窗 →</a>
+    v0.1.0 · OBS Broadcast Scheduler · <a href="/overlay/index.html" target="_blank" class="text-emerald-400 hover:underline">打开浮窗 →</a>
 </footer>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="/admin/app.js"></script>
 </body>
 </html>

@@ -119,7 +119,9 @@ local function spawn_engine()
     return false
   end
   if IS_WIN then
-    os.execute("start " .. q("") .. " /MIN " .. q(exe))
+    -- /B = same (invisible) session, no new console. The engine is built as a
+    -- windows-subsystem binary so it never allocates a console window.
+    os.execute("start " .. q("") .. " /B " .. q(exe))
   else
     os.execute(q(exe) .. " >/dev/null 2>&1 &")
   end
