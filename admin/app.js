@@ -31,14 +31,36 @@ let playlistCache = [];
 /* -------------------------------------------------------------------------- */
 
 window.addEventListener('DOMContentLoaded', () => {
-    setupTabs();
-    setupDashboardActions();
-    setupPlaylistAdd();
-    setupSettings();
-    initTimeline();
+    // Each wiring step is isolated on purpose: if one of them throws, the
+    // rest of the console must still work. Previously a single failure here
+    // aborted the whole boot and left every button looking dead.
+    const steps = [
+        ['页签切换', setupTabs],
+        ['主控台按钮', setupDashboardActions],
+        ['节目表', setupPlaylistAdd],
+        ['设置', setupSettings],
+        ['时间轴', initTimeline],
+    ];
+    for (const [label, fn] of steps) {
+        try {
+            fn();
+        } catch (e) {
+            showGlobalError(`「${label}」初始化失败，该部分功能不可用`, e);
+        }
+    }
     refreshAll();
     startWs();
 });
+
+// Friendly banner: the message is meant for a human, the stack goes to the
+// browser console only (a wall of raw stack text on screen looks like a bug).
+function showGlobalError(friendly, err) {
+    console.error('[admin]', friendly, err);
+    const el = document.getElementById('global-error');
+    if (!el) return;
+    el.textContent = `⚠️ ${friendly}。请把浏览器控制台（F12）里的报错发给我们。`;
+    el.hidden = false;
+}
 
 function setupTabs() {
     const buttons = document.querySelectorAll('.nav-tab');
@@ -128,7 +150,8 @@ async function apiDelete(url, body) {
 /* -------------------------------------------------------------------------- */
 
 function renderDashboard(s) {
-    const sch = s.scheduler || {};
+    // Same compatibility shim as renderStatus (old key: `status`).
+    const sch = s.scheduler || s.status || {};
     const onAir = sch.scheduler_state === 'Playing' ||
                   sch.scheduler_state === 'Interstitial';
     document.getElementById('dash-on-air-dot')?.classList.toggle('bg-red-500', onAir);
@@ -223,52 +246,189 @@ async function toggleArmed() {
 /* -------------------------------------------------------------------------- */
 
 function renderStatus(s) {
+    // Old engines returned the runtime state under `status`; the current
+    // engine (and the /ws snapshot) uses `scheduler`. Accept both.
+    const sch = s.scheduler || s.status || {};
     const eng = document.getElementById('status-eng');
     const obs = document.getElementById('status-obs');
     const cfg = document.getElementById('status-cfg');
-    eng.textContent = s.scheduler ? `引擎 ${s.scheduler.scheduler_state || 'Idle'}` : '引擎 无响应';
-    eng.className = `pill ${s.scheduler?.obs_connected ? 'pill-ok' : 'pill-warn'}`;
-    obs.textContent = `OBS ${s.scheduler?.obs_connected ? '已连' : '未连'}`;
-    obs.className = `pill ${s.scheduler?.obs_connected ? 'pill-ok' : 'pill-warn'}`;
-    cfg.textContent = s.target_input
-        ? `目标: ${s.target_input}`
-        : 'OBS-WS 待配置';
-    cfg.className = `pill ${s.target_input ? 'pill-ok' : 'pill-muted'}`;
+    eng.textContent = `引擎 ${sch.scheduler_state || 'Idle'}`;
+    eng.className = `pill ${sch.obs_connected ? 'pill-ok' : 'pill-warn'}`;
+    obs.textContent = `OBS ${sch.obs_connected ? '已连' : '未连'}`;
+    obs.className = `pill ${sch.obs_connected ? 'pill-ok' : 'pill-warn'}`;
+    const target = s.target_input || (s.config && s.config.target_input) || '';
+    cfg.textContent = target ? `目标: ${target}` : 'OBS-WS 待配置';
+    cfg.className = `pill ${target ? 'pill-ok' : 'pill-muted'}`;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Playlist                                                                  */
 /* -------------------------------------------------------------------------- */
 
+// Inline feedback right next to the buttons. Relying only on the dashboard
+// activity log made actions look like "nothing happened" from other tabs.
+function setPlaylistStatus(msg, kind) {
+    const el = document.getElementById('playlist-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = 'text-xs mt-2 ' + (kind === 'ok' ? 'text-emerald-400' : kind === 'err' ? 'text-red' : 'text-muted');
+}
+
+// Turn an HTTP failure into something actionable instead of "HTTP 401".
+function friendlyWriteError(e) {
+    const s = String(e && e.message ? e.message : e);
+    if (/401/.test(s)) {
+        return '没有通过授权：请先在 OBS 的脚本面板里点一次「Test Connection」（它会把授权令牌交给引擎），然后再试';
+    }
+    if (/403/.test(s)) return '引擎拒绝了该操作（HTTP 403）';
+    if (/404/.test(s)) return '引擎没有这个接口（HTTP 404）——可能是旧版引擎，请更新到最新包';
+    if (/Failed to fetch|NetworkError|ECONNREFUSED/i.test(s)) {
+        return '连不上引擎：引擎进程可能没在跑，请在 OBS 脚本里点「Test Connection」或重启 OBS';
+    }
+    return s;
+}
+
+// Add one program, used by both the "+" button and file imports.
+async function addProgram(name, path, startAtMs, durationMs, kind) {
+    return apiPost(API.playlistItem, {
+        id: cryptoRandomId(),
+        name,
+        file_path: path,
+        start_at_ms: startAtMs,
+        declared_duration_ms: durationMs || 30 * 60 * 1000,
+        kind: kind || 'primary',
+    });
+}
+
+// Browsers never expose a file's absolute path, so the user tells us the
+// folder once (remembered locally) and we join it with the picked file name.
+function mediaRootInput() {
+    return document.getElementById('media-root');
+}
+function mediaPathFor(file) {
+    const rootEl = mediaRootInput();
+    const root = (rootEl && rootEl.value || '').trim();
+    const rel = file.webkitRelativePath || file.name;
+    if (!root) return rel;
+    const sep = /[\\/]$/.test(root) ? '' : (root.includes('\\') ? '\\' : '/');
+    return root + sep + rel;
+}
+function hasMediaRoot() {
+    const rootEl = mediaRootInput();
+    return !!(rootEl && rootEl.value.trim());
+}
+
 function setupPlaylistAdd() {
-    document.getElementById('btn-add-program').addEventListener('click', async () => {
-        const name = document.getElementById('playlist-add-name').value.trim();
-        const path = document.getElementById('playlist-add-path').value.trim();
-        if (!name || !path) {
-            log('新增节目需要名称和路径');
-            return;
-        }
-        try {
-            await apiPost(API.playlistItem, {
-                id: cryptoRandomId(),
-                name,
-                file_path: path,
-                start_at_ms: Date.now() + 60_000, /* default +60s */
-                declared_duration_ms: 30 * 60 * 1000,
-                kind: 'primary',
-            });
-            log(`已新增：${name}`);
-            document.getElementById('playlist-add-name').value = '';
-            document.getElementById('playlist-add-path').value = '';
-            await refreshAll();
-        } catch (e) {
-            log(`add failed: ${e}`);
+    // Keyboard shortcuts advertised in the UI (Ctrl/⌘ + N / + S).
+    document.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        const k = (e.key || '').toLowerCase();
+        const t = e.target;
+        const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT');
+        if (k === 'n' && !typing) {
+            e.preventDefault();
+            document.querySelector('.nav-tab[data-tab="playlist"]')?.click();
+            document.getElementById('playlist-add-name')?.focus();
+        } else if (k === 's') {
+            e.preventDefault();
+            saveCfg();
         }
     });
 
-    // Bulk-import a playlist file (JSON or TSV/TXT). Kept local — nothing is
-    // uploaded to a server, rows are upserted one-by-one through the same
-    // authenticated REST endpoint the "+" button uses.
+    // Remember the media folder between sessions.
+    const rootEl = mediaRootInput();
+    if (rootEl) {
+        try { rootEl.value = localStorage.getItem('tvbs.mediaRoot') || ''; } catch (_) {}
+        rootEl.addEventListener('change', () => {
+            try { localStorage.setItem('tvbs.mediaRoot', rootEl.value.trim()); } catch (_) {}
+        });
+    }
+
+    document.getElementById('btn-add-program').addEventListener('click', async () => {
+        const nameEl = document.getElementById('playlist-add-name');
+        const pathEl = document.getElementById('playlist-add-path');
+        const name = (nameEl && nameEl.value || '').trim();
+        const path = (pathEl && pathEl.value || '').trim();
+        if (!name || !path) {
+            setPlaylistStatus('请填写节目名称和文件路径（或点「选择文件」挑一个视频）', 'err');
+            return;
+        }
+        setPlaylistStatus('正在新增…');
+        try {
+            await addProgram(name, path, Date.now() + 60_000, 30 * 60 * 1000, 'primary');
+            if (nameEl) nameEl.value = '';
+            if (pathEl) pathEl.value = '';
+            setPlaylistStatus(`✅ 已新增「${name}」`, 'ok');
+            log(`已新增：${name}`);
+            await refreshAll();
+        } catch (e) {
+            const msg = friendlyWriteError(e);
+            setPlaylistStatus(`新增失败：${msg}`, 'err');
+            log(`新增失败：${msg}`);
+        }
+    });
+
+    // Pick a single media file to fill the form.
+    const pickBtn = document.getElementById('btn-pick-media');
+    const mediaInput = document.getElementById('media-file-input');
+    let pickMode = 'fill';
+    if (pickBtn && mediaInput) {
+        pickBtn.addEventListener('click', () => { pickMode = 'fill'; mediaInput.click(); });
+    }
+    const importMediaBtn = document.getElementById('btn-import-media');
+    if (importMediaBtn && mediaInput) {
+        importMediaBtn.addEventListener('click', () => { pickMode = 'batch'; mediaInput.click(); });
+    }
+    if (mediaInput) {
+        mediaInput.addEventListener('change', async () => {
+            const files = Array.from(mediaInput.files || []);
+            mediaInput.value = '';
+            if (!files.length) return;
+
+            if (pickMode === 'fill') {
+                const f = files[0];
+                const nameEl = document.getElementById('playlist-add-name');
+                const pathEl = document.getElementById('playlist-add-path');
+                if (nameEl && !nameEl.value.trim()) {
+                    nameEl.value = f.name.replace(/\.[^.]+$/, '');
+                }
+                if (pathEl) pathEl.value = mediaPathFor(f);
+                setPlaylistStatus(
+                    hasMediaRoot()
+                        ? `已选择：${f.name}（路径已填好，点「新增节目」即可）`
+                        : `已选择：${f.name}。请先在旁边的框里填好文件所在目录，路径才是完整的`,
+                    hasMediaRoot() ? 'ok' : 'err'
+                );
+                return;
+            }
+
+            // Batch: one program per selected media file, laid back-to-back.
+            setPlaylistStatus(`正在导入 ${files.length} 个媒体文件…`);
+            const base = Date.now() + 60_000;
+            let ok = 0;
+            for (let i = 0; i < files.length; i++) {
+                const f = files[i];
+                try {
+                    await addProgram(
+                        f.name.replace(/\.[^.]+$/, ''),
+                        mediaPathFor(f),
+                        base + i * 30 * 60 * 1000,
+                        30 * 60 * 1000,
+                        'primary'
+                    );
+                    ok++;
+                } catch (e) {
+                    log(`导入「${f.name}」失败：${friendlyWriteError(e)}`);
+                }
+            }
+            const tail = hasMediaRoot() ? '' : '（未填媒体目录，路径可能不完整）';
+            setPlaylistStatus(`✅ 已导入 ${ok}/${files.length} 个文件${tail}`, ok ? 'ok' : 'err');
+            log(`媒体文件导入：成功 ${ok}/${files.length}${tail}`);
+            await refreshAll();
+        });
+    }
+
+    // Import a playlist LIST file (JSON or TXT) — same authenticated endpoint.
     const importBtn = document.getElementById('btn-import-open');
     const fileInput = document.getElementById('playlist-import');
     if (importBtn && fileInput) {
@@ -277,41 +437,32 @@ function setupPlaylistAdd() {
             const file = fileInput.files && fileInput.files[0];
             fileInput.value = '';
             if (!file) return;
+            setPlaylistStatus('正在导入节目表…');
             try {
                 const text = await file.text();
                 const rows = parsePlaylistFile(file.name, text);
                 if (!rows.length) {
-                    log(`导入文件「${file.name}」里没解析到任何节目行`);
+                    setPlaylistStatus(`「${file.name}」里没有解析到任何节目行`, 'err');
                     return;
                 }
                 let ok = 0;
                 const base = Date.now();
                 for (let i = 0; i < rows.length; i++) {
                     const r = rows[i];
-                    // If the file does not provide absolute start times, lay
-                    // the rows back-to-back from +60 s so the playlist is
-                    // immediately drivable.
                     const start = r.start_at_ms != null
                         ? r.start_at_ms
                         : base + 60_000 + i * (r.declared_duration_ms || 30 * 60 * 1000);
                     try {
-                        await apiPost(API.playlistItem, {
-                            id: cryptoRandomId(),
-                            name: r.name,
-                            file_path: r.file_path,
-                            start_at_ms: start,
-                            declared_duration_ms: r.declared_duration_ms || 30 * 60 * 1000,
-                            kind: r.kind || 'primary',
-                        });
+                        await addProgram(r.name, r.file_path, start, r.declared_duration_ms, r.kind);
                         ok++;
                     } catch (e) {
-                        log(`导入第 ${i + 1} 条失败（${r.name}）：${e}`);
+                        log(`导入第 ${i + 1} 条失败（${r.name}）：${friendlyWriteError(e)}`);
                     }
                 }
-                log(`✅ 导入完成：成功 ${ok}/${rows.length} 条（${file.name}）`);
+                setPlaylistStatus(`✅ 导入完成：成功 ${ok}/${rows.length} 条（${file.name}）`, ok ? 'ok' : 'err');
                 await refreshAll();
             } catch (e) {
-                log(`导入失败：${e}`);
+                setPlaylistStatus(`导入失败：${friendlyWriteError(e)}`, 'err');
             }
         });
     }
@@ -411,20 +562,23 @@ function engineToken() {
 // the user is NOT currently editing, so typing isn't clobbered by polls.
 function renderSettingsForm() {
     const snap = lastSnapshot;
-    if (!snap || !snap.obs_ws) return;
+    if (!snap) return;
+    // Tolerate both the flattened shape and the older nested `config` one.
+    const cfgObs = snap.obs_ws || (snap.config && snap.config.obs_ws) || null;
+    if (!cfgObs) return;
     const active = document.activeElement;
     const setVal = (id, val, guard) => {
         if (active && active.id === id) return; // user typing in this field
         const el = document.getElementById(id);
         if (el) el.value = val;
     };
-    setVal('cfg-host', snap.obs_ws.host || '127.0.0.1');
-    setVal('cfg-port', snap.obs_ws.port != null ? snap.obs_ws.port : 4455);
-    setVal('cfg-password', snap.obs_ws.password || '');
+    setVal('cfg-host', cfgObs.host || '127.0.0.1');
+    setVal('cfg-port', cfgObs.port != null ? cfgObs.port : 4455);
+    setVal('cfg-password', cfgObs.password || '');
     const tlsEl = document.getElementById('cfg-tls');
-    if (tlsEl && active && active.id !== 'cfg-tls') tlsEl.checked = !!snap.obs_ws.tls;
-    setVal('cfg-target-input', snap.target_input || '');
-    const sc = snap.scheduler_cfg || {};
+    if (tlsEl && active && active.id !== 'cfg-tls') tlsEl.checked = !!cfgObs.tls;
+    setVal('cfg-target-input', snap.target_input || (snap.config && snap.config.target_input) || '');
+    const sc = snap.scheduler_cfg || (snap.config && snap.config.scheduler) || {};
     setVal('cfg-lead-in', sc.lead_in_ms != null ? sc.lead_in_ms : 200);
     setVal('cfg-clock-offset', sc.clock_offset_ms != null ? sc.clock_offset_ms : 0);
     setVal('cfg-missing-policy', sc.on_missing_file || 'skip_to_next');

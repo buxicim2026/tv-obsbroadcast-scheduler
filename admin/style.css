@@ -244,7 +244,6 @@ a:hover { text-decoration: underline; }
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    animation: pulse 1.5s ease-in-out infinite;
 }
 .shadow-red-glow { box-shadow: 0 0 16px rgba(255, 59, 48, 0.6); }
 
@@ -448,3 +447,93 @@ footer { color: var(--muted); }
 
 /* Pill states smooth out. */
 .pill { transition: color 150ms ease, background 150ms ease, border-color 150ms ease; }
+
+/* ================== responsive / window-size adaptation ================== */
+/* The console is opened in a normal browser window, resized freely, or docked
+   into a very narrow OBS sidebar. Nothing may overflow or get clipped: forms
+   shrink, cards stack, and wide tables scroll instead of stretching the page. */
+
+/* Inputs never force the layout wider than the viewport. */
+.form-input, select.form-input { max-width: 100%; min-width: 0; }
+.w-96 { width: 24rem; max-width: 100%; }
+.max-w-md { max-width: 100%; }
+
+/* Any flex row can wrap instead of pushing content off-screen. */
+.flex.items-center.gap-2,
+.flex.items-center.gap-3,
+.flex.items-start.justify-between { flex-wrap: wrap; }
+
+/* Wide playlist table: scroll inside its card, never stretch the page. */
+main table { min-width: 640px; }
+.overflow-x-auto { max-width: 100%; }
+
+/* Timeline hour ruler thins out on narrow screens. */
+@media (max-width: 900px) {
+    #timeline-hours span:nth-child(n+13) { display: none; }
+}
+
+/* ---- tablet / small laptop: stack the dashboard ------------------------- */
+@media (max-width: 1024px) {
+    header .status-strip { flex-wrap: wrap; }
+    .grid-cols-12 > [class*="col-span"] { grid-column: 1 / -1; }
+    .lg\:col-span-5, .lg\:col-span-7 { grid-column: 1 / -1; }
+    #dash-remaining { font-size: 40px; }
+}
+
+/* ---- narrow windows / OBS dock: single column, tighter type -------------- */
+@media (max-width: 720px) {
+    body { font-size: 12px; }
+    header { padding: 10px 14px; }
+    header .brand-name { font-size: 13px; }
+    main { padding: 12px; }
+    .card { padding: 14px; border-radius: 12px; }
+    .grid { gap: 12px; }
+    .grid-cols-2, .grid-cols-3 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+    #dash-remaining { font-size: 32px; }
+    .text-3xl { font-size: 20px; }
+    .text-5xl { font-size: 32px; }
+    .preview { min-height: auto; }
+    .history { max-height: 140px; }
+    /* The 24h ruler would be unreadable; show every 6th hour only. */
+    #timeline-hours span { display: none; }
+    #timeline-hours span:nth-child(6n+1) { display: block; }
+    .tl-block { font-size: 9px; }
+}
+
+/* ---- OBS Custom Browser Dock (often 300–480 px wide) -------------------- */
+body.dock {
+    font-size: 12px;
+}
+body.dock header { padding: 8px 10px; gap: 6px; flex-wrap: wrap; }
+body.dock main { padding: 8px; }
+body.dock .grid { grid-template-columns: 1fr; gap: 8px; padding: 0; }
+body.dock .card { padding: 12px; }
+body.dock .grid-cols-12 > [class*="col-span"],
+body.dock .lg\:col-span-5,
+body.dock .lg\:col-span-7 { grid-column: 1 / -1; }
+body.dock .form-input { width: 100%; }
+body.dock .w-96 { width: 100%; }
+body.dock #dash-remaining { font-size: 28px; }
+body.dock .text-3xl { font-size: 18px; }
+body.dock .preview { height: auto; min-height: 200px; }
+body.dock .history { max-height: 110px; }
+body.dock #timeline-hours span { display: none; }
+body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
+
+/* ---- very wide screens: keep line lengths comfortable ------------------- */
+@media (min-width: 1700px) {
+    body { font-size: 13.5px; }
+    main { max-width: 1600px; }
+}
+
+/* Global error banner (friendly text, stack goes to the console only). */
+#global-error {
+    margin: 12px 0;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: rgba(255, 59, 48, 0.10);
+    border: 1px solid rgba(255, 59, 48, 0.4);
+    color: #FFC9C5;
+    font-size: 12px;
+}
+#global-error[hidden] { display: none; }

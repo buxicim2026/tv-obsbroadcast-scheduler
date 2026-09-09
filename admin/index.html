@@ -33,6 +33,7 @@
 </header>
 
 <main class="px-6 py-6 max-w-screen-2xl mx-auto">
+    <div id="global-error" hidden></div>
 
     <!-- 屏 1 — Dashboard / 主控台 -->
     <section data-tab="dashboard" class="tab-panel">
@@ -111,20 +112,33 @@
         <div class="bg-surface border border-border rounded-2xl p-6">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-lg font-bold">节目清单</h2>
-                <div class="flex items-center gap-2">
-                    <input id="playlist-add-name" placeholder="新节目名" class="form-input" />
-                    <input id="playlist-add-path" placeholder="本地视频文件路径" class="form-input w-96" />
-                    <button class="btn btn-primary" id="btn-add-program">新增节目</button>
-                </div>
-                <div class="flex items-center gap-2 mt-3">
-                    <button class="btn btn-secondary" id="btn-import-open">📂 导入节目表</button>
-                    <span class="text-muted text-xs">
-                        JSON：<code>{"items":[{"name","file_path","start_at_ms","declared_duration_ms","kind"}]}</code>；
-                        TXT：每行 <code>节目名&nbsp;TAB&nbsp;视频路径</code>（+60s 开播 / 30 分钟时长）
-                    </span>
-                    <input type="file" id="playlist-import" accept=".json,.txt" hidden />
-                </div>
             </div>
+
+            <!-- 单条新增：手填路径，或用「选择文件」从本机挑一个视频/图片 -->
+            <div class="flex items-center gap-2">
+                <input id="playlist-add-name" placeholder="新节目名" class="form-input" />
+                <input id="playlist-add-path" placeholder="本地视频/图片文件路径（可点右侧按钮选择）" class="form-input w-96" />
+                <button class="btn btn-secondary" id="btn-pick-media"
+                        title="从本机选择视频或图片文件">📁 选择文件</button>
+                <button class="btn btn-primary" id="btn-add-program">新增节目</button>
+            </div>
+
+            <!-- 批量导入 -->
+            <div class="flex items-center gap-2 mt-3">
+                <button class="btn btn-secondary" id="btn-import-open">📂 导入节目表文件</button>
+                <button class="btn btn-secondary" id="btn-import-media">🎬 导入媒体文件（可多选）</button>
+                <input id="media-root" class="form-input"
+                       placeholder="媒体所在目录，例如 D:\media 或 /home/me/media"
+                       title="浏览器不会给出文件的完整路径；填好文件所在目录后，选择文件会自动拼成完整路径" />
+                <details class="text-muted text-xs">
+                    <summary>支持哪些文件？</summary>
+                    <span>节目表文件：JSON 清单，或 TXT（每行「节目名 + 制表符/竖线 + 文件路径」）。
+                    媒体文件：视频或图片，一次可选多个，按顺序排在时间表上（默认每条 30 分钟）。</span>
+                </details>
+                <input type="file" id="playlist-import" accept=".json,.txt" hidden />
+                <input type="file" id="media-file-input" accept="video/*,image/*" multiple hidden />
+            </div>
+            <div id="playlist-status" class="text-xs mt-2" role="status" aria-live="polite"></div>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                     <thead>
@@ -142,7 +156,8 @@
                     <tbody id="playlist-tbody" class="divide-y divide-border"></tbody>
                 </table>
             </div>
-            <p class="text-muted text-xs mt-3">提示：每条节目的「起始」是 Unix 毫秒时间戳（绝对时间）。可用 <code>Ctrl + N</code> 新增，<code>Ctrl + S</code> 立即落盘。</p>
+            <p class="text-muted text-xs mt-3">提示：每条改动都会立即写入引擎配置。「起始」是绝对时间（Unix 毫秒）。
+                快捷键：<code>Ctrl/⌘ + N</code> 跳到新增节目，<code>Ctrl/⌘ + S</code> 保存设置。</p>
         </div>
     </section>
 
