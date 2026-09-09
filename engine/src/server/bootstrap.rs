@@ -41,11 +41,14 @@ pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<BootstrapPayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    // Validate the bootstrap token if the engine already has one.
+    // Validate the bootstrap token if the engine already has one. An *empty*
+    // token means "not issued yet" (e.g. the admin saved settings before the
+    // OBS script ever bootstrapped) — accept and adopt the new one instead of
+    // rejecting forever, which would lock the plugin out of its own engine.
     {
         let cfg = state.config.read();
         if let Some(expected) = cfg.bootstrap_token.as_ref() {
-            if expected != &payload.bootstrap_token {
+            if !expected.is_empty() && expected != &payload.bootstrap_token {
                 return Err((StatusCode::UNAUTHORIZED, "bad bootstrap token".into()));
             }
         }

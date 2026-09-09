@@ -161,10 +161,29 @@ local function ensure_token(settings)
   return token
 end
 
+-- 等引擎 HTTP 端口就绪（刚 spawn 的进程需要一点时间监听）。
+-- os.clock 忙等：脚本环境没有可靠的 sleep，且这里最多阻塞 3 秒。
+local function wait_engine(seconds)
+  local deadline = os.clock() + (seconds or 3)
+  while os.clock() < deadline do
+    local _, code = http("GET", "/healthz")
+    if code == "200" then return true end
+    local until_ = os.clock() + 0.25
+    while os.clock() < until_ do end
+  end
+  return false
+end
+
 -- 把当前 settings 推给引擎（bootstrap + 调度开关）。
 local function push_settings(settings)
   if settings == nil then return false end
   ensure_engine()
+  if not wait_engine(3) then
+    obs.blog(obs.LOG_WARNING,
+      LOG_TAG .. "engine not answering /healthz yet — settings not pushed; "
+      .. "open the script panel and press Test Connection once OBS is idle")
+    return false
+  end
 
   local token = ensure_token(settings)
   local payload = string.format(
@@ -187,10 +206,10 @@ local function push_settings(settings)
   end
 
   local enabled = obs.obs_data_get_bool(settings, "scheduler_enabled")
-  http("POST", "/api/scheduler/enable",
+  local _, en_code = http("POST", "/api/scheduler/enable",
     string.format('{"enabled":%s}', enabled and "true" or "false"), token)
   obs.blog(obs.LOG_INFO, LOG_TAG .. "settings pushed (scheduler_enabled="
-    .. tostring(enabled) .. ")")
+    .. tostring(enabled) .. ", enable->HTTP " .. tostring(en_code) .. ")")
   return true
 end
 
@@ -216,7 +235,14 @@ function on_test_clicked(props, property)
   local body, code = http("GET", "/healthz")
   obs.blog(obs.LOG_INFO, LOG_TAG .. "healthz -> HTTP " .. tostring(code) .. " " .. tostring(body))
   if code == "200" and script_settings ~= nil then
-    push_settings(script_settings)
+    if push_settings(script_settings) then
+      obs.blog(obs.LOG_INFO,
+        LOG_TAG .. "Test Connection OK: credentials + token delivered to the engine")
+    else
+      obs.blog(obs.LOG_WARNING,
+        LOG_TAG .. "Test Connection: engine reachable but settings were NOT accepted "
+        .. "(see the lines above) — check OBS menu Help > Log Files > View Current Log")
+    end
   end
   return true
 end
@@ -319,6 +345,12 @@ function script_load(settings)
   script_settings = settings
   obs.obs_register_source(source_info)
   ensure_engine()
+  -- Push on load as well: otherwise the engine only ever sees the credentials
+  -- (and the bootstrap token the admin needs for writes) when the user happens
+  -- to open the script panel and press Test Connection.
+  if settings ~= nil then
+    push_settings(settings)
+  end
 end
 
 function script_update(settings)

@@ -118,6 +118,14 @@
             <div class="flex items-center gap-2">
                 <input id="playlist-add-name" placeholder="新节目名" class="form-input" />
                 <input id="playlist-add-path" placeholder="本地视频/图片文件路径（可点右侧按钮选择）" class="form-input w-96" />
+                <select id="playlist-add-kind" class="form-input" title="节目类型">
+                    <option value="primary">正片</option>
+                    <option value="interstitial">插播</option>
+                    <option value="standalone">独立</option>
+                </select>
+                <input id="playlist-add-duration" type="number" min="1" step="1" value="30"
+                       class="form-input" style="width:96px" title="预计时长（分钟）" />
+                <span class="text-muted text-xs">分钟</span>
                 <button class="btn btn-secondary" id="btn-pick-media"
                         title="从本机选择视频或图片文件">📁 选择文件</button>
                 <button class="btn btn-primary" id="btn-add-program">新增节目</button>
@@ -230,8 +238,13 @@
 
 </main>
 
-<footer class="px-6 py-4 text-muted text-xs text-center">
-    v0.1.0 · OBS Broadcast Scheduler · <a href="/overlay/index.html" target="_blank" class="text-emerald-400 hover:underline">打开浮窗 →</a>
+<footer class="px-6 py-4 text-muted text-xs flex items-center justify-center gap-3 flex-wrap">
+    <span>v0.1.0 · OBS Broadcast Scheduler</span>
+    <a href="/overlay/index.html" target="_blank" class="text-emerald-400 hover:underline">打开浮窗 →</a>
+    <span class="opacity-30">·</span>
+    <span>本插件由不息传播开发</span>
+    <button id="support-btn" class="btn btn-secondary" type="button"
+            title="支持我们（赞助链接待补充）">支持我们</button>
 </footer>
 
 <script type="module" src="/admin/app.js"></script>

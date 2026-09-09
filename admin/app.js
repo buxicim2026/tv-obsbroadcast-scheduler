@@ -25,6 +25,7 @@ let ws = null;
 let wsReconnectTimer = null;
 let lastSnapshot = null;
 let playlistCache = [];
+let bumpersCache = [];
 
 /* -------------------------------------------------------------------------- */
 /* Boot                                                                      */
@@ -74,7 +75,7 @@ function setupTabs() {
                     if (!panel.classList.contains('tab-panel')) return;
                     panel.classList.toggle('hidden', panel.dataset.tab !== tab);
                 });
-            if (tab === 'timeline') renderTimeline(playlistCache);
+            if (tab === 'timeline') renderTimeline(timelineItems());
         });
     });
 
@@ -99,13 +100,14 @@ async function refreshAll() {
         ]);
         lastSnapshot = status;
         playlistCache = playlist.items || [];
+        bumpersCache = playlist.bumpers || [];
         renderStatus(status);
         renderDashboard(status);
         renderSettingsForm();
         renderPlaylistRows();
-        renderBumpers(playlist.bumpers || []);
+        renderBumpers(bumpersCache);
         if (!document.querySelector('[data-tab="timeline"]').classList.contains('hidden')) {
-            renderTimeline(playlistCache);
+            renderTimeline(timelineItems());
         }
     } catch (e) {
         log(`refreshAll failed: ${e}`);
@@ -125,22 +127,43 @@ function authHeaders() {
     };
 }
 
+/// Refresh the cached snapshot (which carries the bootstrap token) and return
+/// the fresh token. Cheap, and it is what recovers a stale/missing token.
+async function reloadToken() {
+    try {
+        const s = await fetch(API.status).then(r => r.json());
+        lastSnapshot = { ...(lastSnapshot || {}), ...s };
+    } catch (_) {}
+    return (lastSnapshot && lastSnapshot.bootstrap_token) || '';
+}
+
+/// One write attempt. `send` performs the actual fetch with the given token.
+async function writeWithAuth(send) {
+    let res = await send(authHeaders());
+    if (res.status !== 401 && res.status !== 403) return res;
+    // Token was stale/lost (e.g. a WS frame replaced the snapshot before the
+    // engine started sending the token). Re-read it and retry exactly once.
+    await reloadToken();
+    res = await send(authHeaders());
+    return res;
+}
+
 async function apiPost(url, body) {
-    const res = await fetch(url, {
+    const res = await writeWithAuth((headers) => fetch(url, {
         method: 'POST',
-        headers: authHeaders(),
+        headers,
         body: JSON.stringify(body),
-    });
+    }));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json().catch(() => ({}));
 }
 
 async function apiDelete(url, body) {
-    const res = await fetch(url, {
+    const res = await writeWithAuth((headers) => fetch(url, {
         method: 'DELETE',
-        headers: authHeaders(),
+        headers,
         body: JSON.stringify(body),
-    });
+    }));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json().catch(() => ({}));
 }
@@ -228,6 +251,17 @@ function setupDashboardActions() {
     document.getElementById('btn-manage-bumpers').addEventListener('click', () => {
         document.querySelector('.nav-tab[data-tab="timeline"]')?.click();
     });
+    // Support button: the sponsor link is not decided yet, so acknowledge the
+    // click in place instead of navigating nowhere.
+    const supportBtn = document.getElementById('support-btn');
+    if (supportBtn) {
+        supportBtn.addEventListener('click', () => {
+            const original = supportBtn.textContent;
+            supportBtn.textContent = '感谢支持 · 链接待开放';
+            log('感谢支持！赞助链接即将开放，敬请期待。');
+            setTimeout(() => { supportBtn.textContent = original; }, 2500);
+        });
+    }
 }
 
 async function toggleArmed() {
@@ -252,13 +286,14 @@ function renderStatus(s) {
     const eng = document.getElementById('status-eng');
     const obs = document.getElementById('status-obs');
     const cfg = document.getElementById('status-cfg');
+    // Plain labels — no coloured status lights (ON AIR is the only lamp).
     eng.textContent = `引擎 ${sch.scheduler_state || 'Idle'}`;
-    eng.className = `pill ${sch.obs_connected ? 'pill-ok' : 'pill-warn'}`;
+    eng.className = 'pill';
     obs.textContent = `OBS ${sch.obs_connected ? '已连' : '未连'}`;
-    obs.className = `pill ${sch.obs_connected ? 'pill-ok' : 'pill-warn'}`;
+    obs.className = 'pill';
     const target = s.target_input || (s.config && s.config.target_input) || '';
     cfg.textContent = target ? `目标: ${target}` : 'OBS-WS 待配置';
-    cfg.className = `pill ${target ? 'pill-ok' : 'pill-muted'}`;
+    cfg.className = 'pill';
 }
 
 /* -------------------------------------------------------------------------- */
@@ -286,6 +321,34 @@ function friendlyWriteError(e) {
         return '连不上引擎：引擎进程可能没在跑，请在 OBS 脚本里点「Test Connection」或重启 OBS';
     }
     return s;
+}
+
+/// Start time for the next program: never earlier than +60 s, and never before
+/// the current last program ends — otherwise every new entry piled up on the
+/// same timestamp and the scheduler played them all at once.
+function nextStartAt(durationMs) {
+    const dur = durationMs || 30 * 60 * 1000;
+    let start = Date.now() + 60_000;
+    if (playlistCache.length) {
+        const last = playlistCache[playlistCache.length - 1];
+        const lastEnd = (last.start_at_ms || 0) + (last.declared_duration_ms || 0);
+        if (lastEnd + 5_000 > start) start = lastEnd + 5_000;
+    }
+    return start;
+}
+
+function selectedKind() {
+    const el = document.getElementById('playlist-add-kind');
+    return (el && el.value) || 'primary';
+}
+
+/// Declared duration from the "minutes" field. The engine probes the real
+/// length after the first play, but the schedule needs an estimate until then —
+/// a wrong fixed 30 min for every entry is what makes the timeline drift.
+function defaultDurationMs() {
+    const el = document.getElementById('playlist-add-duration');
+    const min = parseInt(el && el.value, 10);
+    return (isFinite(min) && min > 0 ? min : 30) * 60 * 1000;
 }
 
 // Add one program, used by both the "+" button and file imports.
@@ -355,7 +418,8 @@ function setupPlaylistAdd() {
         }
         setPlaylistStatus('正在新增…');
         try {
-            await addProgram(name, path, Date.now() + 60_000, 30 * 60 * 1000, 'primary');
+            const dur = defaultDurationMs();
+            await addProgram(name, path, nextStartAt(dur), dur, selectedKind());
             if (nameEl) nameEl.value = '';
             if (pathEl) pathEl.value = '';
             setPlaylistStatus(`✅ 已新增「${name}」`, 'ok');
@@ -404,7 +468,8 @@ function setupPlaylistAdd() {
 
             // Batch: one program per selected media file, laid back-to-back.
             setPlaylistStatus(`正在导入 ${files.length} 个媒体文件…`);
-            const base = Date.now() + 60_000;
+            const dur = defaultDurationMs();
+            const base = nextStartAt(dur);
             let ok = 0;
             for (let i = 0; i < files.length; i++) {
                 const f = files[i];
@@ -412,9 +477,9 @@ function setupPlaylistAdd() {
                     await addProgram(
                         f.name.replace(/\.[^.]+$/, ''),
                         mediaPathFor(f),
-                        base + i * 30 * 60 * 1000,
-                        30 * 60 * 1000,
-                        'primary'
+                        base + i * dur,
+                        dur,
+                        selectedKind()
                     );
                     ok++;
                 } catch (e) {
@@ -446,12 +511,12 @@ function setupPlaylistAdd() {
                     return;
                 }
                 let ok = 0;
-                const base = Date.now();
+                const base = nextStartAt(30 * 60 * 1000);
                 for (let i = 0; i < rows.length; i++) {
                     const r = rows[i];
                     const start = r.start_at_ms != null
                         ? r.start_at_ms
-                        : base + 60_000 + i * (r.declared_duration_ms || 30 * 60 * 1000);
+                        : base + i * (r.declared_duration_ms || 30 * 60 * 1000);
                     try {
                         await addProgram(r.name, r.file_path, start, r.declared_duration_ms, r.kind);
                         ok++;
@@ -511,9 +576,37 @@ function parsePlaylistFile(name, raw) {
         .filter(Boolean);
 }
 
+/// Items drawn on the 24h timeline: programs plus their bumpers (an
+/// interstitial scheduled at an offset inside a program would otherwise be
+/// invisible in the timeline view).
+function timelineItems() {
+    const byId = new Map(playlistCache.map(p => [p.id, p]));
+    const bumpers = (bumpersCache || []).map(b => {
+        const target = byId.get(b.target_program_id);
+        if (!target) return null;
+        return {
+            id: b.id,
+            name: b.content.name,
+            start_at_ms: (target.start_at_ms || 0) + (b.at_into_program_ms || 0),
+            declared_duration_ms: b.content.declared_duration_ms || 0,
+            kind: 'bumper',
+        };
+    }).filter(Boolean);
+    return [...playlistCache, ...bumpers];
+}
+
 function renderPlaylistRows() {
     const tbody = document.getElementById('playlist-tbody');
     tbody.innerHTML = '';
+
+    if (!playlistCache.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="8" class="py-4 text-center text-muted text-xs">' +
+            '还没有节目。用上方「新增节目」或「📁 选择文件」添加，也可以用「导入节目表文件」批量导入。</td>';
+        tbody.appendChild(tr);
+        return;
+    }
+
     playlistCache.forEach((p, i) => {
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-surface-2 transition';
@@ -529,16 +622,52 @@ function renderPlaylistRows() {
             <td class="py-2 pr-2 font-mono text-xs">${msToHMS(p.declared_duration_ms)}</td>
             <td class="py-2 pr-2 font-mono text-xs text-muted">${p.detected_duration_ms ? msToHMS(p.detected_duration_ms) : '—'}</td>
             <td class="py-2 pr-2 text-right">
-                <button class="btn btn-link" data-act="up" data-id="${p.id}">↑</button>
-                <button class="btn btn-link" data-act="down" data-id="${p.id}">↓</button>
+                <button class="btn btn-link" data-act="up" data-id="${p.id}"
+                        ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
+                <button class="btn btn-link" data-act="down" data-id="${p.id}"
+                        ${i === playlistCache.length - 1 ? 'disabled' : ''} title="下移">↓</button>
                 <button class="btn btn-link text-red" data-act="del" data-id="${p.id}">删除</button>
             </td>`;
         tbody.appendChild(tr);
     });
-    tbody.querySelectorAll('button[data-act="del"]').forEach(b => {
-        b.addEventListener('click', async () => {
-            await apiDelete(API.playlistItem, { id: b.dataset.id });
+
+    // Reorder by swapping the two neighbours' start times: the engine always
+    // sorts by start_at_ms, so the broadcast order follows the table order.
+    const move = async (id, dir) => {
+        const idx = playlistCache.findIndex(p => p.id === id);
+        const j = idx + dir;
+        if (idx < 0 || j < 0 || j >= playlistCache.length) return;
+        const a = playlistCache[idx];
+        const b = playlistCache[j];
+        setPlaylistStatus('正在调整顺序…');
+        try {
+            await apiPost(API.playlistItem, { ...a, start_at_ms: b.start_at_ms });
+            await apiPost(API.playlistItem, { ...b, start_at_ms: a.start_at_ms });
+            setPlaylistStatus(`✅ 已调整「${a.name}」的播出顺序`, 'ok');
             await refreshAll();
+        } catch (e) {
+            setPlaylistStatus(`调整顺序失败：${friendlyWriteError(e)}`, 'err');
+        }
+    };
+
+    tbody.querySelectorAll('button[data-act]').forEach(b => {
+        const id = b.dataset.id;
+        const act = b.dataset.act;
+        b.addEventListener('click', async () => {
+            if (act === 'up') return move(id, -1);
+            if (act === 'down') return move(id, 1);
+            if (act === 'del') {
+                const item = playlistCache.find(p => p.id === id);
+                const label = item ? item.name : id;
+                if (!window.confirm(`确定删除节目「${label}」？该操作不可撤销。`)) return;
+                try {
+                    await apiDelete(API.playlistItem, { id });
+                    setPlaylistStatus(`✅ 已删除「${label}」`, 'ok');
+                    await refreshAll();
+                } catch (e) {
+                    setPlaylistStatus(`删除失败：${friendlyWriteError(e)}`, 'err');
+                }
+            }
         });
     });
 }
@@ -627,14 +756,22 @@ async function saveCfg() {
 }
 
 async function testCfg() {
-    document.getElementById('cfg-status').textContent = '正在探测…';
+    const el = document.getElementById('cfg-status');
+    el.textContent = '正在探测…';
     try {
-        const r = await fetch(API.health);
-        const j = await r.json();
-        document.getElementById('cfg-status').textContent =
-            `引擎在线：${j.service} v${j.version}`;
+        // Report the OBS link too — "test connection" that only proves the
+        // engine is up says nothing about obs-websocket, which is the part
+        // that actually fails (wrong port / password / server disabled).
+        const [h, s] = await Promise.all([
+            fetch(API.health).then(r => r.json()),
+            fetch(API.status).then(r => r.json()),
+        ]);
+        const sch = s.scheduler || s.status || {};
+        const obsTxt = sch.obs_connected ? 'OBS 已连接' : 'OBS 未连接';
+        const why = sch.obs_error ? `（${sch.obs_error}）` : '';
+        el.textContent = `引擎在线：${h.service} v${h.version}；${obsTxt}${why}`;
     } catch (e) {
-        document.getElementById('cfg-status').textContent = `不可达：${e}`;
+        el.textContent = `不可达：${e}`;
     }
 }
 
@@ -652,9 +789,19 @@ function startWs() {
             try {
                 const msg = JSON.parse(ev.data);
                 if (msg.kind === 'snapshot') {
-                    lastSnapshot = msg;
-                    renderStatus(msg);
-                    renderDashboard(msg);
+                    // Merge, never replace: a push frame does not carry every
+                    // field (older engines omit the token / obs_ws settings),
+                    // and dropping the token made every write fail with 401.
+                    lastSnapshot = { ...(lastSnapshot || {}), ...msg };
+                    renderStatus(lastSnapshot);
+                    renderDashboard(lastSnapshot);
+                    // The engine only pushes status, not the playlist. If the
+                    // item count changed (another client, or the scheduler
+                    // probing durations), pull the list again.
+                    if (typeof msg.playlist_size === 'number'
+                        && msg.playlist_size !== playlistCache.length) {
+                        refreshAll();
+                    }
                 }
             } catch (_) {}
         });
@@ -677,7 +824,7 @@ function log(msg) {
     const li = document.createElement('li');
     li.className = 'flex items-start gap-2';
     const s = String(msg);
-    const isErr = /失败|错误|拒绝|401|500|not|err/i.test(s) && !/成功/.test(s);
+    const isErr = /失败|错误|拒绝|(HTTP\s*[45]\d\d)/i.test(s) && !/成功/.test(s);
     li.innerHTML = `<span class="text-muted">${new Date().toLocaleTimeString()}</span>` +
         `<span class="${isErr ? 'text-red' : ''}">${escapeHtml(s)}</span>`;
     ol.prepend(li);
