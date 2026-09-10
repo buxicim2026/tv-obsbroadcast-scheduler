@@ -15,6 +15,7 @@ const API = {
     start: '/api/scheduler/start',
     reorder: '/api/playlist/reorder',
     verify: '/api/playlist/verify',
+    upload: '/api/playlist/upload',
     fsBrowse: '/api/fs/browse',
     fsStat: '/api/fs/stat',
     health: '/healthz',
@@ -301,6 +302,11 @@ function setupDashboardActions() {
 
 async function toggleArmed() {
     const running = !!(lastSnapshot && lastSnapshot.scheduler && lastSnapshot.scheduler.scheduler_running);
+    const btn = document.getElementById('btn-armed');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = running ? '停止中…' : '启动中…';
+    }
     try {
         if (running) {
             await apiPost(API.enable, { enabled: false });
@@ -315,8 +321,16 @@ async function toggleArmed() {
             log('已开始自动播出（节目单已按当前时刻对齐）');
         }
         await refreshAll();
+        // Pull once more a moment later: the scheduler needs a tick to flip
+        // scheduler_running, and the button label reads from that snapshot.
+        setTimeout(refreshAll, 600);
     } catch (e) {
         log(`切换自动播出失败：${friendlyWriteError(e)}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = running ? '启用自动播出' : '停用自动播出';
+        }
     }
 }
 
@@ -411,24 +425,6 @@ async function addProgram(name, path, startAtMs, durationMs, kind) {
     });
 }
 
-// Browsers never expose a file's absolute path, so the user tells us the
-// folder once (remembered locally) and we join it with the picked file name.
-function mediaRootInput() {
-    return document.getElementById('media-root');
-}
-function mediaPathFor(file) {
-    const rootEl = mediaRootInput();
-    const root = (rootEl && rootEl.value || '').trim();
-    const rel = file.webkitRelativePath || file.name;
-    if (!root) return rel;
-    const sep = /[\\/]$/.test(root) ? '' : (root.includes('\\') ? '\\' : '/');
-    return root + sep + rel;
-}
-function hasMediaRoot() {
-    const rootEl = mediaRootInput();
-    return !!(rootEl && rootEl.value.trim());
-}
-
 function setupPlaylistAdd() {
     // Keyboard shortcuts advertised in the UI (Ctrl/⌘ + N / + S).
     document.addEventListener('keydown', (e) => {
@@ -445,15 +441,6 @@ function setupPlaylistAdd() {
             saveCfg();
         }
     });
-
-    // Remember the media folder between sessions.
-    const rootEl = mediaRootInput();
-    if (rootEl) {
-        try { rootEl.value = localStorage.getItem('tvbs.mediaRoot') || ''; } catch (_) {}
-        rootEl.addEventListener('change', () => {
-            try { localStorage.setItem('tvbs.mediaRoot', rootEl.value.trim()); } catch (_) {}
-        });
-    }
 
     // 「新增节目」同样是选文件：名称取文件名、时长自动探测，不让用户手填。
     document.getElementById('btn-add-program').addEventListener('click', () => {
@@ -478,48 +465,44 @@ function setupPlaylistAdd() {
             mediaInput.value = '';
             if (!files.length) return;
 
-            // 浏览器只给文件名，必须拼成引擎能打开的绝对路径。拼完先问引擎
-            // 这些路径是否真的存在，否则会导进一堆"异常"节目（也就播不出来）。
-            const paths = files.map(f => mediaPathFor(f));
-            let missing = [];
-            try {
-                const j = await apiPost(API.fsStat, { paths });
-                missing = j.missing || [];
-            } catch (_) { /* 引擎太旧没有该接口：跳过预检 */ }
-            if (missing.length) {
-                setPlaylistStatus(
-                    `有 ${missing.length} 个路径在引擎所在的电脑上不存在（媒体目录没填对）。` +
-                    `建议改用「🗂 浏览本机文件」，路径由引擎给出、必定可用。例如：${missing[0]}`,
-                    'err'
-                );
-                return;
-            }
-
-            setPlaylistStatus(`正在读取 ${files.length} 个文件的时长…`);
+            // Pick -> upload -> import. The browser cannot reveal an absolute
+            // path, so we hand the bytes to the engine and use the path it
+            // reports back. No folder typing, no 异常 rows.
+            setPlaylistStatus(`正在读取 ${files.length} 个文件…`);
             const probed = await Promise.all(files.map(probeMediaFile));
             const broken = probed.filter(p => !p.ok);
             if (broken.length) {
                 log(`无法读取（可能损坏或格式不支持）：${broken.map(p => p.file.name).join('、')}`);
             }
 
-            // Back-to-back in the order they were picked: the channel simply
-            // plays the list top to bottom.
             let cursor = nextStartAt(0);
             let ok = 0;
-            for (const item of probed) {
-                const name = item.file.name.replace(/\.[^.]+$/, '');
+            for (let i = 0; i < probed.length; i++) {
+                const item = probed[i];
+                const label = item.file.name;
+                const name = label.replace(/\.[^.]+$/, '');
                 const dur = item.durationMs > 0 ? item.durationMs : 30 * 60 * 1000;
+                setPlaylistStatus(`正在导入 ${i + 1}/${probed.length}：${label}…`);
+                let path = '';
                 try {
-                    await addProgram(name, mediaPathFor(item.file), cursor, dur, 'primary');
+                    path = await uploadMediaFile(item.file);
+                } catch (e) {
+                    log(`上传「${label}」失败：${friendlyWriteError(e)}`);
+                    continue;
+                }
+                try {
+                    await addProgram(name, path, cursor, dur, 'primary');
                     cursor += dur;
                     ok++;
                 } catch (e) {
-                    log(`导入「${item.file.name}」失败：${friendlyWriteError(e)}`);
+                    log(`导入「${label}」失败：${friendlyWriteError(e)}`);
                 }
             }
-            const tail = hasMediaRoot() ? '' : '（未填媒体目录，路径可能不完整）';
-            setPlaylistStatus(`✅ 已导入 ${ok}/${files.length} 个文件，时长已自动识别${tail}`, ok ? 'ok' : 'err');
-            log(`导入完成：成功 ${ok}/${files.length}${tail}`);
+            setPlaylistStatus(
+                `✅ 已导入 ${ok}/${probed.length} 个文件（时长自动识别，已保存到引擎 media 目录）`,
+                ok ? 'ok' : 'err'
+            );
+            log(`导入完成：成功 ${ok}/${probed.length}`);
             await refreshAll();
         });
     }
@@ -723,6 +706,27 @@ async function addFromBrowser(f) {
     }
 }
 
+/// Hand the file bytes to the engine and get back the absolute path it was
+/// stored at. This is what lets "pick files" be the whole workflow.
+async function uploadMediaFile(file) {
+    const res = await writeWithAuth((headers) => fetch(API.upload, {
+        method: 'POST',
+        headers: {
+            ...headers,
+            'Content-Type': 'application/octet-stream',
+            // encodeURIComponent keeps non-ASCII names header-safe.
+            'X-File-Name': encodeURIComponent(file.name),
+        },
+        body: file,
+    }));
+    if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+    }
+    const j = await res.json();
+    return j.path;
+}
+
 /// Read a media file's real duration in the browser (no upload, no ffprobe).
 /// Images have no duration, so they get a short default slot.
 const IMAGE_SLOT_MS = 10_000;
@@ -863,7 +867,8 @@ function renderPlaylistRows() {
     if (!playlistCache.length) {
         const tr = document.createElement('tr');
         tr.innerHTML = '<td colspan="8" class="py-4 text-center text-muted text-xs">' +
-            '还没有节目。用上方「新增节目」或「📁 选择文件」添加，也可以用「导入节目表文件」批量导入。</td>';
+            '还没有节目。点上方「📁 选择文件（可多选，直接导入）」一次导入多个视频，' +
+            '或用「🗂 从本机已有文件选择」直接引用本机文件。</td>';
         tbody.appendChild(tr);
         return;
     }

@@ -139,6 +139,23 @@ impl Scheduler {
                 if machine.is_active() {
                     self.become_idle(&state, &mut machine);
                 }
+                // Mirror the stop into AppStatus. This used to be skipped by
+                // `continue`, so after pressing stop the UI still showed
+                // 播出中 and the arm/disarm button looked completely broken.
+                {
+                    let mut st = state.status.write();
+                    if st.scheduler_running
+                        || st.current_program_id.is_some()
+                        || st.current_program_name.is_some()
+                    {
+                        st.scheduler_running = false;
+                        st.scheduler_state = "Idle".to_string();
+                        st.current_program_id = None;
+                        st.current_program_name = None;
+                        st.current_remaining_ms = None;
+                    }
+                }
+                prev_active = false;
                 continue;
             }
 
@@ -236,10 +253,11 @@ impl Scheduler {
                                 // the spawned task.
                                 let obs = self.obs.clone();
                                 let input = self.target_input.clone();
+                                let fpath = p.file_path.clone();
                                 let st = state.clone();
                                 let pname = p.name.clone();
                                 tokio::spawn(async move {
-                                    Scheduler::confirm_playback(obs, input, st, pname).await;
+                                    Scheduler::confirm_playback(obs, input, fpath, st, pname).await;
                                 });
                             }
                             Err(e) => {
@@ -586,39 +604,82 @@ impl Scheduler {
     async fn confirm_playback(
         obs: ClientHandle,
         target_input: String,
+        file_path: String,
         state: crate::AppState,
         program_name: String,
     ) {
         tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
         let Some(client) = obs.current() else { return };
-        match client.get_media_input_status(&target_input).await {
+
+        let is_playing = |s: &str| {
+            let u = s.to_ascii_uppercase();
+            u.contains("PLAYING") || u.contains("OPENING") || u.contains("BUFFERING")
+        };
+
+        let first = client.get_media_input_status(&target_input).await;
+        match first {
+            Ok(s) if is_playing(&s.media_state) => {
+                info!(
+                    "playback confirmed for '{}' on input '{}' (state={}, {}ms)",
+                    program_name, target_input, s.media_state, s.media_duration
+                );
+                state.status.write().last_error = None;
+                return;
+            }
             Ok(s) => {
-                let st = s.media_state.to_ascii_uppercase();
-                if st.contains("PLAYING") || st.contains("OPENING") || st.contains("BUFFERING") {
-                    info!(
-                        "playback confirmed for '{}' on input '{}' (state={}, {}ms)",
-                        program_name, target_input, s.media_state, s.media_duration
-                    );
-                    let mut guard = state.status.write();
-                    guard.last_error = None;
-                } else {
-                    let msg = format!(
-                        "OBS 报告媒体源 '{}' 未开始播放（mediaState={}），请确认目标源是媒体源、名字与下拉里的一致，且文件格式受 OBS 支持",
-                        target_input, s.media_state
-                    );
-                    warn!("{}", msg);
-                    let mut guard = state.status.write();
-                    guard.last_error = Some(msg);
-                }
+                // Not playing yet — re-apply the file and nudge once. Swapping
+                // `local_file` while the source is idle needs a second RESTART
+                // on some OBS builds.
+                warn!(
+                    "'{}' did not start on '{}' (mediaState={}); retrying the cut once",
+                    program_name, target_input, s.media_state
+                );
+                let _ = client
+                    .set_input_settings(
+                        &target_input,
+                        crate::interrupt::settings_payload(&file_path),
+                        true,
+                    )
+                    .await;
+                let _ = client
+                    .trigger_media_input_action(&target_input, MediaInputAction::Restart)
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
             }
             Err(e) => {
                 warn!(
                     "播放确认失败（媒体源 '{}' 可能不存在或不是媒体源）：{:#}",
                     target_input, e
                 );
-                let mut guard = state.status.write();
-                guard.last_error = Some(format!(
+                state.status.write().last_error = Some(format!(
                     "无法查询媒体源 '{}' 的播放状态：{e}（目标源名可能不对，请在设置页用下拉选择）",
+                    target_input
+                ));
+                return;
+            }
+        }
+
+        match client.get_media_input_status(&target_input).await {
+            Ok(s) if is_playing(&s.media_state) => {
+                info!(
+                    "playback confirmed after retry for '{}' (state={})",
+                    program_name, s.media_state
+                );
+                state.status.write().last_error = None;
+            }
+            Ok(s) => {
+                let msg = format!(
+                    "OBS 里媒体源 '{}' 仍未播放（mediaState={}）。请检查：① 它是媒体源（不是 VLC 源）；\
+                     ② 已加入当前场景且可见（未被隐藏）；③ 设置页里的目标源名与 OBS 中完全一致；\
+                     ④ 文件是 OBS 支持的格式：{}",
+                    target_input, s.media_state, file_path
+                );
+                warn!("{}", msg);
+                state.status.write().last_error = Some(msg);
+            }
+            Err(e) => {
+                state.status.write().last_error = Some(format!(
+                    "复查媒体源 '{}' 失败：{e}",
                     target_input
                 ));
             }

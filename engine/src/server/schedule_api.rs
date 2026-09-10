@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use axum::extract::Query;
 use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
+use tracing::info;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -360,6 +361,141 @@ pub async fn stat_paths(Json(payload): Json<StatPayload>) -> Json<Value> {
         }
     }
     Json(json!({ "existing": existing, "missing": missing }))
+}
+
+/// Accept a media file picked in the browser and store it next to the config.
+///
+/// A browser file picker never reveals an absolute path, and asking the
+/// operator to type the containing folder produced paths the engine could not
+/// open — rows showed up as 异常 and nothing played. Uploading gives us a path
+/// we know exists, so "pick files" really is all the operator has to do.
+pub async fn upload_media(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+
+    let raw = headers
+        .get("X-File-Name")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let decoded = percent_decode(&raw);
+    // Never trust a client-supplied path: keep only the file name.
+    let file_name = std::path::Path::new(&decoded)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if file_name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "缺少文件名 (X-File-Name)".into()));
+    }
+
+    // Only media / image types: this folder is played back by OBS, so keep
+    // stray files (and accidental uploads) out of it.
+    let ext = std::path::Path::new(&file_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !(MEDIA_EXT.contains(&ext.as_str()) || IMAGE_EXT.contains(&ext.as_str())) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("不支持的文件类型：{ext}（仅支持视频/图片/音频）"),
+        ));
+    }
+
+    // The whole body is buffered in memory, so cap it. 4 GiB is far beyond any
+    // sane single programme file and still generous for long-form broadcast.
+    const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
+    if body.len() > MAX_UPLOAD_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "文件过大（上限 4GB）".into(),
+        ));
+    }
+
+    let dir = media_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("创建媒体目录失败: {e}")))?;
+    let target = unique_path(dir.join(&file_name));
+    std::fs::write(&target, &body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入文件失败: {e}")))?;
+
+    info!("stored uploaded media at {}", target.display());
+    Ok(Json(json!({
+        "ok": true,
+        "path": target.display().to_string(),
+        "name": file_name,
+        "size": body.len(),
+    })))
+}
+
+/// Imported media lives in `<config dir>/media`.
+fn media_dir() -> std::path::PathBuf {
+    let base = crate::config_path();
+    let parent = base
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    parent.join("media")
+}
+
+/// Avoid clobbering an existing file: `name.mp4` -> `name-1.mp4`.
+fn unique_path(p: std::path::PathBuf) -> std::path::PathBuf {
+    if !p.exists() {
+        return p;
+    }
+    let parent = p.parent().map(|x| x.to_path_buf()).unwrap_or_default();
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    for i in 1..999 {
+        let name = if ext.is_empty() {
+            format!("{stem}-{i}")
+        } else {
+            format!("{stem}-{i}.{ext}")
+        };
+        let cand = parent.join(name);
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    p
+}
+
+/// Minimal percent-decoding for the `X-File-Name` header (file names can be
+/// non-ASCII and cannot be sent raw in a header).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// List OBS inputs so the admin can pick the real Media Source name.

@@ -98,6 +98,7 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         .route("/api/obs/inputs", get(schedule_api::obs_inputs))
         .route("/api/fs/browse", get(schedule_api::browse))
         .route("/api/fs/stat", post(schedule_api::stat_paths))
+        .route("/api/playlist/upload", post(schedule_api::upload_media))
         .route(
             "/api/playlist/item",
             post(schedule_api::upsert_item).delete(schedule_api::delete_item),

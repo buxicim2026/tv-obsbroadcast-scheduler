@@ -111,14 +111,11 @@
 
             <!-- 主流程：只选文件，名称与时长自动识别；类型在表格里选 -->
             <div class="flex items-center gap-2">
-                <button class="btn btn-primary" id="btn-browse"
-                        title="直接从引擎所在电脑选择文件（路径一定有效）">🗂 浏览本机文件</button>
-                <button class="btn btn-secondary" id="btn-pick-media"
-                        title="用浏览器选择，需要填好下面的媒体目录">📁 选择文件（可多选）</button>
-                <input id="media-root" class="form-input"
-                       placeholder="媒体所在目录，例如 D:\media 或 /home/me/media"
-                       title="浏览器不会给出文件的完整路径；填好文件所在目录后，选择的文件会自动拼成完整路径" />
-                <span class="text-muted text-xs">导入后自动读取时长，名称取文件名，只需在表格里选「节目类型」。</span>
+                <button class="btn btn-primary" id="btn-pick-media"
+                        title="一次可选多个，选完自动上传并加入节目单">📁 选择文件（可多选，直接导入）</button>
+                <button class="btn btn-secondary" id="btn-browse"
+                        title="不上传，直接引用引擎电脑上已有的文件">🗂 从本机已有文件选择</button>
+                <span class="text-muted text-xs">选中即导入：自动读取时长、以文件名命名，文件保存在引擎的 media 目录，无需填任何路径。</span>
                 <input type="file" id="media-file-input" accept="video/*,image/*" multiple hidden />
             </div>
 
