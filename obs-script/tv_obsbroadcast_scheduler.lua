@@ -175,7 +175,9 @@ local function wait_engine(seconds)
 end
 
 -- 把当前 settings 推给引擎（bootstrap + 调度开关）。
-local function push_settings(settings)
+-- apply_enabled=false：只送凭据，**不要**恢复上次的自动播出状态。
+-- OBS 启动（脚本加载）后应处于待命，由操作员在面板/网页里手动开启。
+local function push_settings(settings, apply_enabled)
   if settings == nil then return false end
   ensure_engine()
   if not wait_engine(3) then
@@ -205,7 +207,8 @@ local function push_settings(settings)
     return false
   end
 
-  local enabled = obs.obs_data_get_bool(settings, "scheduler_enabled")
+  local enabled = (apply_enabled ~= false)
+    and obs.obs_data_get_bool(settings, "scheduler_enabled")
   local _, en_code = http("POST", "/api/scheduler/enable",
     string.format('{"enabled":%s}', enabled and "true" or "false"), token)
   obs.blog(obs.LOG_INFO, LOG_TAG .. "settings pushed (scheduler_enabled="
@@ -348,8 +351,9 @@ function script_load(settings)
   -- Push on load as well: otherwise the engine only ever sees the credentials
   -- (and the bootstrap token the admin needs for writes) when the user happens
   -- to open the script panel and press Test Connection.
+  -- 第二参数 false = 只送凭据，不自动开播（保持待命）。
   if settings ~= nil then
-    push_settings(settings)
+    push_settings(settings, false)
   end
 end
 

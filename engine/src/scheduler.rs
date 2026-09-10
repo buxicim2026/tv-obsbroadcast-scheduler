@@ -227,7 +227,18 @@ impl Scheduler {
                                 }
                                 return;
                             }
-                            Ok(false) => {}
+                            Ok(false) => {
+                                // Fire-and-forget: ask OBS whether the media
+                                // really started. A wrong source name or an
+                                // unsupported file otherwise fails silently and
+                                // the operator just sees "nothing happened".
+                                let sched = self.clone();
+                                let st = state.clone();
+                                let pname = p.name.clone();
+                                tokio::spawn(async move {
+                                    sched.confirm_playback(st, pname).await;
+                                });
+                            }
                             Err(e) => {
                                 self.transition_to_error(state, &format!("cut: {e}"), machine);
                                 return;
@@ -562,6 +573,46 @@ impl Scheduler {
         }
         drop(cfg);
         let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    }
+
+    /// 1.5 s after a cut, verify with OBS that the media is actually playing.
+    /// This is the difference between "silently nothing happened" and a clear
+    /// message in the admin activity log.
+    async fn confirm_playback(&self, state: crate::AppState, program_name: String) {
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        let Some(client) = self.client() else { return };
+        match client.get_media_input_status(&self.target_input).await {
+            Ok(s) => {
+                let st = s.media_state.to_ascii_uppercase();
+                if st.contains("PLAYING") || st.contains("OPENING") || st.contains("BUFFERING") {
+                    info!(
+                        "playback confirmed for '{}' on input '{}' (state={}, {}ms)",
+                        program_name, self.target_input, s.media_state, s.media_duration
+                    );
+                    let mut guard = state.status.write();
+                    guard.last_error = None;
+                } else {
+                    let msg = format!(
+                        "OBS 报告媒体源 '{}' 未开始播放（mediaState={}），请确认目标源是媒体源、名字与下拉里的一致，且文件格式受 OBS 支持",
+                        self.target_input, s.media_state
+                    );
+                    warn!("{}", msg);
+                    let mut guard = state.status.write();
+                    guard.last_error = Some(msg);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "播放确认失败（媒体源 '{}' 可能不存在或不是媒体源）：{:#}",
+                    self.target_input, e
+                );
+                let mut guard = state.status.write();
+                guard.last_error = Some(format!(
+                    "无法查询媒体源 '{}' 的播放状态：{e}（目标源名可能不对，请在设置页用下拉选择）",
+                    self.target_input
+                ));
+            }
+        }
     }
 
     /* ------------------------- obs RPC wrappers ------------------------- */

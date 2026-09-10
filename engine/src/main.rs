@@ -99,7 +99,17 @@ async fn main() -> Result<()> {
     );
 
     // Load (or initialize) config.
-    let config = Config::load_or_init(&cfg_path).context("load config")?;
+    let mut config = Config::load_or_init(&cfg_path).context("load config")?;
+    // Autoplay must never resume by itself. The saved flag is the operator's
+    // last choice, not a request to start playing again after an OBS or engine
+    // restart — the channel waits in standby until it is armed from the panel.
+    if config.scheduler.enabled {
+        info!("scheduler was armed in the saved config — disarming for this launch (autoplay starts on demand)");
+        config.scheduler.enabled = false;
+        if let Err(e) = config.save_atomic(&cfg_path) {
+            warn!(error = %e, "failed to persist the disarmed scheduler state");
+        }
+    }
     let config = Arc::new(RwLock::new(config));
 
     let host = cli.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());

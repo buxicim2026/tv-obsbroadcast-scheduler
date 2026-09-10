@@ -111,8 +111,10 @@
 
             <!-- 主流程：只选文件，名称与时长自动识别；类型在表格里选 -->
             <div class="flex items-center gap-2">
-                <button class="btn btn-primary" id="btn-pick-media"
-                        title="可一次选择多个视频或图片">📁 选择文件（可多选）</button>
+                <button class="btn btn-primary" id="btn-browse"
+                        title="直接从引擎所在电脑选择文件（路径一定有效）">🗂 浏览本机文件</button>
+                <button class="btn btn-secondary" id="btn-pick-media"
+                        title="用浏览器选择，需要填好下面的媒体目录">📁 选择文件（可多选）</button>
                 <input id="media-root" class="form-input"
                        placeholder="媒体所在目录，例如 D:\media 或 /home/me/media"
                        title="浏览器不会给出文件的完整路径；填好文件所在目录后，选择的文件会自动拼成完整路径" />
@@ -245,6 +247,22 @@
     <button id="support-btn" class="btn btn-secondary" type="button"
             title="支持我们（赞助链接待补充）">支持我们</button>
 </footer>
+
+<!-- 本机文件浏览器（路径由引擎返回，保证可用） -->
+<div id="fs-modal" class="guide-modal" hidden>
+    <div class="guide-box">
+        <div class="guide-head">
+            <h3>浏览本机媒体文件</h3>
+            <button class="btn btn-secondary" id="fs-close" type="button">关闭</button>
+        </div>
+        <div class="flex items-center gap-2 mb-3">
+            <button class="btn btn-secondary" id="fs-up" type="button">↑ 上级</button>
+            <span class="text-muted text-xs" id="fs-path"></span>
+        </div>
+        <div id="fs-list" class="fs-list"></div>
+        <p class="text-muted text-xs mt-3">点文件夹进入，点文件即加入节目单。时长会在首次播出时自动探测并回写。</p>
+    </div>
+</div>
 
 <script type="module" src="/admin/app.js"></script>
 </body>

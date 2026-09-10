@@ -540,3 +540,32 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
     font-size: 12px;
 }
 #global-error[hidden] { display: none; }
+
+/* ---------- 本机文件浏览器 ---------- */
+.fs-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    padding: 4px;
+}
+.fs-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 10px;
+    cursor: pointer;
+}
+.fs-row:hover { background: var(--surface-2); }
+.fs-dir { color: var(--blue); }
+.fs-file { color: var(--fg); }

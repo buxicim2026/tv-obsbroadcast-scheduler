@@ -15,6 +15,8 @@ const API = {
     start: '/api/scheduler/start',
     reorder: '/api/playlist/reorder',
     verify: '/api/playlist/verify',
+    fsBrowse: '/api/fs/browse',
+    fsStat: '/api/fs/stat',
     health: '/healthz',
 };
 
@@ -476,6 +478,23 @@ function setupPlaylistAdd() {
             mediaInput.value = '';
             if (!files.length) return;
 
+            // 浏览器只给文件名，必须拼成引擎能打开的绝对路径。拼完先问引擎
+            // 这些路径是否真的存在，否则会导进一堆"异常"节目（也就播不出来）。
+            const paths = files.map(f => mediaPathFor(f));
+            let missing = [];
+            try {
+                const j = await apiPost(API.fsStat, { paths });
+                missing = j.missing || [];
+            } catch (_) { /* 引擎太旧没有该接口：跳过预检 */ }
+            if (missing.length) {
+                setPlaylistStatus(
+                    `有 ${missing.length} 个路径在引擎所在的电脑上不存在（媒体目录没填对）。` +
+                    `建议改用「🗂 浏览本机文件」，路径由引擎给出、必定可用。例如：${missing[0]}`,
+                    'err'
+                );
+                return;
+            }
+
             setPlaylistStatus(`正在读取 ${files.length} 个文件的时长…`);
             const probed = await Promise.all(files.map(probeMediaFile));
             const broken = probed.filter(p => !p.ok);
@@ -502,6 +521,23 @@ function setupPlaylistAdd() {
             setPlaylistStatus(`✅ 已导入 ${ok}/${files.length} 个文件，时长已自动识别${tail}`, ok ? 'ok' : 'err');
             log(`导入完成：成功 ${ok}/${files.length}${tail}`);
             await refreshAll();
+        });
+    }
+
+    // 本机文件浏览器：路径由引擎返回，导入后不可能出现"异常"。
+    const browseBtn = document.getElementById('btn-browse');
+    if (browseBtn) browseBtn.addEventListener('click', () => openFsBrowser(''));
+    const fsClose = document.getElementById('fs-close');
+    if (fsClose) {
+        fsClose.addEventListener('click', () => {
+            const m = document.getElementById('fs-modal');
+            if (m) m.hidden = true;
+        });
+    }
+    const fsModal = document.getElementById('fs-modal');
+    if (fsModal) {
+        fsModal.addEventListener('click', (e) => {
+            if (e.target === fsModal) fsModal.hidden = true;
         });
     }
 
@@ -602,6 +638,88 @@ function setupPlaylistAdd() {
                 setPlaylistStatus(`导入失败：${friendlyWriteError(e)}`, 'err');
             }
         });
+    }
+}
+
+/* ---------------------- 本机文件浏览器（引擎侧路径） ---------------------- */
+
+async function openFsBrowser(path) {
+    const modal = document.getElementById('fs-modal');
+    if (modal) modal.hidden = false;
+    await loadFs(path || '');
+}
+
+async function loadFs(path) {
+    const list = document.getElementById('fs-list');
+    const pathEl = document.getElementById('fs-path');
+    const upBtn = document.getElementById('fs-up');
+    if (!list) return;
+    list.innerHTML = '<div class="text-muted text-xs" style="padding:10px">加载中…</div>';
+    let j = {};
+    try {
+        const url = API.fsBrowse + (path ? '?path=' + encodeURIComponent(path) : '');
+        const r = await fetch(url);
+        j = await r.json();
+    } catch (e) {
+        list.innerHTML = `<div class="text-red text-xs" style="padding:10px">无法读取目录：${escapeHtml(String(e))}</div>`;
+        return;
+    }
+    if (pathEl) pathEl.textContent = j.path || '请选择磁盘或目录';
+    if (upBtn) {
+        upBtn.disabled = !j.parent;
+        upBtn.onclick = () => { if (j.parent) loadFs(j.parent); };
+    }
+    list.innerHTML = '';
+    if (j.error) {
+        const d = document.createElement('div');
+        d.className = 'text-red text-xs';
+        d.style.padding = '10px';
+        d.textContent = j.error;
+        list.appendChild(d);
+    }
+    (j.dirs || []).forEach(d => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fs-row fs-dir';
+        row.textContent = '📁 ' + d.name;
+        row.addEventListener('click', () => loadFs(d.path));
+        list.appendChild(row);
+    });
+    (j.files || []).forEach(f => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fs-row fs-file';
+        row.innerHTML = `<span>🎬 ${escapeHtml(f.name)}</span>` +
+            `<span class="text-muted">${fmtSize(f.size)}</span>`;
+        row.addEventListener('click', () => addFromBrowser(f));
+        list.appendChild(row);
+    });
+    if (!(j.dirs || []).length && !(j.files || []).length && !j.error) {
+        const d = document.createElement('div');
+        d.className = 'text-muted text-xs';
+        d.style.padding = '10px';
+        d.textContent = '该目录下没有可用的视频/图片。';
+        list.appendChild(d);
+    }
+}
+
+function fmtSize(n) {
+    if (n == null) return '';
+    const mb = n / (1024 * 1024);
+    return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+}
+
+async function addFromBrowser(f) {
+    setPlaylistStatus('正在添加…');
+    const name = f.name.replace(/\.[^.]+$/, '');
+    try {
+        // Real absolute path from the engine; duration is filled in by the
+        // engine's probe once the file plays for the first time.
+        await addProgram(name, f.path, nextStartAt(0), 30 * 60 * 1000, 'primary');
+        setPlaylistStatus(`✅ 已添加「${name}」（时长将在首次播出后自动探测）`, 'ok');
+        await refreshAll();
+    } catch (e) {
+        setPlaylistStatus(`添加失败：${friendlyWriteError(e)}`, 'err');
     }
 }
 

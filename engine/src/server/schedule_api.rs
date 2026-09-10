@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::Query;
 use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -146,6 +147,18 @@ pub async fn delete_item(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StatPayload {
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReorderPayload {
     /// Program ids in the order they should air. Unknown ids keep their
     /// relative position at the end.
@@ -248,6 +261,105 @@ pub async fn start_scheduler(
     let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);
     persist(state.config.clone()).await?;
     Ok(Json(json!({"ok": true, "enabled": true})))
+}
+
+/// Media / image extensions offered by the file browser.
+const MEDIA_EXT: &[&str] = &[
+    "mp4", "mkv", "mov", "avi", "ts", "mxf", "mpg", "mpeg", "flv", "wmv", "webm", "m4v",
+    "mp3", "wav", "aac", "flac",
+];
+const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "bmp", "gif", "webp"];
+
+/// Browse the *engine machine's* filesystem for media files.
+///
+/// A browser file picker only ever yields a bare file name — it never exposes
+/// the absolute path — so joining it with a hand-typed folder produced paths
+/// the engine could not open, and every imported row showed up as 异常. This
+/// lets the operator pick the file through the engine, which knows the real
+/// path.
+pub async fn browse(Query(q): Query<BrowseQuery>) -> Json<Value> {
+    let raw = q.path.clone().unwrap_or_default();
+
+    // No path yet -> offer the entry points (drive letters on Windows).
+    if raw.trim().is_empty() {
+        let mut roots: Vec<Value> = Vec::new();
+        if cfg!(windows) {
+            for c in 'C'..='Z' {
+                let p = format!("{c}:\\");
+                if std::path::Path::new(&p).exists() {
+                    roots.push(json!({ "name": p, "path": p }));
+                }
+            }
+        } else {
+            roots.push(json!({ "name": "/", "path": "/" }));
+            if let Some(home) = dirs::home_dir() {
+                let s = home.display().to_string();
+                roots.push(json!({ "name": s.clone(), "path": s }));
+            }
+        }
+        return Json(json!({ "path": "", "parent": Value::Null, "dirs": roots, "files": [] }));
+    }
+
+    let dir = std::path::PathBuf::from(&raw);
+    if !dir.is_dir() {
+        return Json(json!({
+            "path": raw, "parent": Value::Null, "dirs": [], "files": [],
+            "error": "不是有效目录"
+        }));
+    }
+
+    let mut dirs: Vec<Value> = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(md) = entry.metadata() else { continue };
+            if md.is_dir() {
+                dirs.push(json!({ "name": name, "path": p.display().to_string() }));
+                continue;
+            }
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if MEDIA_EXT.contains(&ext.as_str()) || IMAGE_EXT.contains(&ext.as_str()) {
+                files.push(json!({
+                    "name": name,
+                    "path": p.display().to_string(),
+                    "size": md.len()
+                }));
+            }
+        }
+    }
+    let by_name = |a: &Value, b: &Value| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    };
+    dirs.sort_by(by_name);
+    files.sort_by(by_name);
+
+    Json(json!({
+        "path": dir.display().to_string(),
+        "parent": dir.parent().map(|p| p.display().to_string()),
+        "dirs": dirs,
+        "files": files,
+    }))
+}
+
+/// Check whether a set of paths exists on the engine machine. Used before
+/// importing browser-picked files so we never create rows that are 异常.
+pub async fn stat_paths(Json(payload): Json<StatPayload>) -> Json<Value> {
+    let mut existing: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for p in payload.paths {
+        if !p.trim().is_empty() && std::path::Path::new(&p).exists() {
+            existing.push(p);
+        } else {
+            missing.push(p);
+        }
+    }
+    Json(json!({ "existing": existing, "missing": missing }))
 }
 
 /// List OBS inputs so the admin can pick the real Media Source name.
