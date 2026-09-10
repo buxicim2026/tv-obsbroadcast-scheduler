@@ -118,6 +118,8 @@ async fn main() -> Result<()> {
             // The connector keeps trying with backoff; we just wait on its
             // side-channel and start the scheduler when a client is up.
             let handle = obs_ws::ClientHandle::new();
+            // Expose it to HTTP handlers (admin needs to query OBS inputs).
+            *state_for_tasks.obs_client.lock() = Some(handle.clone());
             tokio::spawn(obs_ws::resilient_connector(
                 cfg_obs.clone(),
                 handle.clone(),

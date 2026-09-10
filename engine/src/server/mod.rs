@@ -95,14 +95,18 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         .route("/api/status", get(schedule_api::status))
         .route("/api/bootstrap", post(bootstrap::bootstrap))
         .route("/api/playlist", get(schedule_api::get_playlist))
+        .route("/api/obs/inputs", get(schedule_api::obs_inputs))
         .route(
             "/api/playlist/item",
             post(schedule_api::upsert_item).delete(schedule_api::delete_item),
         )
+        .route("/api/playlist/reorder", post(schedule_api::reorder))
+        .route("/api/playlist/verify", post(schedule_api::verify))
         .route(
             "/api/scheduler/enable",
             post(schedule_api::enable_scheduler),
         )
+        .route("/api/scheduler/start", post(schedule_api::start_scheduler))
         .route("/ws", get(ws_push::ws_handler))
         .with_state(shared.clone());
 
@@ -154,7 +158,10 @@ async fn index() -> &'static str {
      GET  /api/playlist         playlist snapshot\n\
      POST /api/playlist/item    upsert a program item\n\
      DEL  /api/playlist/item    delete a program item\n\
-     POST /api/scheduler/enable arm / disarm the scheduler\n\
+     POST /api/scheduler/enable arm / disarm the scheduler
+     POST /api/scheduler/start   re-base on now + arm (顺延/提前)
+     POST /api/playlist/reorder  re-sequence rows back-to-back
+     POST /api/playlist/verify   report rows whose media file is missing\n\
      POST /api/bootstrap        one-time C-plugin -> engine bootstrap\n\
      WS   /ws                   live status push\n"
 }

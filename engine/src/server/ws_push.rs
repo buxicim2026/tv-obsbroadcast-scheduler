@@ -32,15 +32,26 @@ async fn ws_loop(mut socket: WebSocket, state: Arc<AppState>) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await; // skip immediate
 
+    // Sending the same JSON twice a second to every open browser is pure
+    // waste (allocation + UTF-8 encode + CEF/JS parse) and it was the main
+    // idle cost with several admin/overlay tabs open. Only push on change,
+    // plus a slow heartbeat so clients still notice a dead connection.
+    let mut last_payload: Option<String> = None;
+    let mut since_beat = std::time::Instant::now();
+    const HEARTBEAT: Duration = Duration::from_secs(5);
+
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if socket
-                    .send(Message::Text(snapshot(&state).to_string()))
-                    .await
-                    .is_err()
-                {
-                    return;
+                let payload = snapshot(&state).to_string();
+                let changed = last_payload.as_deref() != Some(payload.as_str());
+                let heartbeat = since_beat.elapsed() >= HEARTBEAT;
+                if changed || heartbeat {
+                    if socket.send(Message::Text(payload.clone())).await.is_err() {
+                        return;
+                    }
+                    last_payload = Some(payload);
+                    since_beat = std::time::Instant::now();
                 }
             }
             n = notify_rx.recv() => {

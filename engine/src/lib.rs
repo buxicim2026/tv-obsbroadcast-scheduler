@@ -47,6 +47,10 @@ pub struct AppState {
     /// Notifies connected overlays / admin pages that the playlist or OBS
     /// state changed. Receivers should re-fetch whatever they need.
     pub notify: tokio::sync::broadcast::Sender<NotifyKind>,
+    /// Handle to the live obs-websocket client (set once the connector is up).
+    /// Lets HTTP handlers query OBS itself — e.g. list the inputs so the admin
+    /// can pick the target Media Source by name instead of typing it.
+    pub obs_client: Arc<parking_lot::Mutex<Option<crate::obs_ws::ClientHandle>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +67,7 @@ impl AppState {
             config,
             status: Arc::new(RwLock::new(AppStatus::default())),
             notify,
+            obs_client: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }

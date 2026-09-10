@@ -145,6 +145,146 @@ pub async fn delete_item(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReorderPayload {
+    /// Program ids in the order they should air. Unknown ids keep their
+    /// relative position at the end.
+    pub ids: Vec<String>,
+    /// Absolute start (epoch ms) for the first row. Omit to keep the current
+    /// first row's start time.
+    #[serde(default)]
+    pub base_start_ms: Option<i64>,
+    /// Re-base the whole list on "now" instead — this is what makes the
+    /// schedule 顺延 / 提前 when the operator arms it earlier or later than
+    /// the planned 开播时间.
+    #[serde(default)]
+    pub from_now: bool,
+}
+
+/// Re-sequence the playlist: reorder rows and lay them back-to-back so there
+/// are no gaps or overlaps (which is what made rows air out of order).
+pub async fn reorder(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ReorderPayload>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    let (items, ends_at) = {
+        let mut cfg = state.config.write();
+        let rank: std::collections::HashMap<String, usize> = payload
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
+        let max_rank = rank.len();
+        cfg.playlist.items.sort_by_key(|p| rank.get(&p.id).copied().unwrap_or(max_rank));
+
+        let first_start = cfg
+            .playlist
+            .items
+            .first()
+            .map(|p| p.start_at_ms)
+            .unwrap_or_else(chrono_now_ms);
+
+        // Lay out back-to-back from the chosen base.
+        let mut cursor = if payload.from_now {
+            chrono_now_ms() + 1_000
+        } else {
+            payload.base_start_ms.unwrap_or(first_start)
+        };
+        for p in cfg.playlist.items.iter_mut() {
+            p.start_at_ms = cursor;
+            let dur = p
+                .detected_duration_ms
+                .filter(|d| *d > 0)
+                .unwrap_or(p.declared_duration_ms);
+            cursor = cursor.saturating_add(dur.max(1) as i64);
+        }
+        (cfg.playlist.items.len(), cursor)
+    };
+    let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    persist(state.config.clone()).await?;
+    Ok(Json(json!({"ok": true, "items": items, "ends_at_ms": ends_at})))
+}
+
+/// Arm the scheduler AND re-base the list on the moment the operator actually
+/// pressed the button (顺延 / 提前 vs. the planned 开播时间).
+pub async fn start_scheduler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ReorderPayload>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    {
+        let mut cfg = state.config.write();
+        let rank: std::collections::HashMap<String, usize> = payload
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
+        let max_rank = rank.len();
+        if !rank.is_empty() {
+            cfg.playlist
+                .items
+                .sort_by_key(|p| rank.get(&p.id).copied().unwrap_or(max_rank));
+        }
+        let mut cursor = payload
+            .base_start_ms
+            .filter(|v| *v > 0)
+            .unwrap_or_else(|| chrono_now_ms() + 1_000);
+        for p in cfg.playlist.items.iter_mut() {
+            p.start_at_ms = cursor;
+            let dur = p
+                .detected_duration_ms
+                .filter(|d| *d > 0)
+                .unwrap_or(p.declared_duration_ms);
+            cursor = cursor.saturating_add(dur.max(1) as i64);
+        }
+        cfg.scheduler.enabled = true;
+    }
+    let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);
+    persist(state.config.clone()).await?;
+    Ok(Json(json!({"ok": true, "enabled": true})))
+}
+
+/// List OBS inputs so the admin can pick the real Media Source name.
+pub async fn obs_inputs(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let handle = state.obs_client.lock().clone();
+    let Some(h) = handle else {
+        return Json(json!({"inputs": [], "error": "OBS 未连接"}));
+    };
+    let Some(client) = h.current() else {
+        return Json(json!({"inputs": [], "error": "OBS 未连接"}));
+    };
+    match client.get_input_list().await {
+        Ok(list) => Json(json!({"inputs": list})),
+        Err(e) => Json(json!({"inputs": [], "error": e.to_string()})),
+    }
+}
+
+/// Report rows whose media file is missing/blank so the admin can flag them
+/// as 异常 before they are supposed to air.
+pub async fn verify(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cfg = state.config.read();
+    let missing: Vec<String> = cfg
+        .playlist
+        .items
+        .iter()
+        .filter(|p| {
+            p.file_path.trim().is_empty() || !std::path::Path::new(&p.file_path).exists()
+        })
+        .map(|p| p.id.clone())
+        .collect();
+    Json(json!({"missing": missing}))
+}
+
+fn chrono_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 pub async fn enable_scheduler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

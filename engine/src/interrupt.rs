@@ -73,7 +73,10 @@ pub fn settings_payload(file_path: &str) -> serde_json::Value {
         "is_local_file": true,
         "looping": false,
         "restart_on_activate": false,
-        "close_when_inactive": true,
+        // Do NOT let OBS close the file when the source is not active: with a
+        // single-source broadcast layout an "inactive" source would silently
+        // show nothing instead of the programme.
+        "close_when_inactive": false,
         "linear_alpha": 0,
         "speed_percent": 100,
         "clear_on_media_end": true,

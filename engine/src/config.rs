@@ -90,12 +90,34 @@ pub struct ProgramEntry {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// What a playlist row is. Purely descriptive — the scheduler plays rows in
+/// `start_at_ms` order regardless of kind, so a channel can sequence
+/// 正片 → 公益广告 → 频道ID → 节目预告 → 宣传片 → 插播内容 in any order.
+///
+/// `standalone` was the old third kind; it is accepted as an alias of
+/// `primary` so existing config.json files keep loading.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgramKind {
+    /// 正片
+    #[serde(alias = "standalone")]
     Primary,
+    /// 公益广告
+    PublicService,
+    /// 频道 ID（台标 / 呼号）
+    ChannelId,
+    /// 节目预告
+    Preview,
+    /// 宣传片
+    Promo,
+    /// 插播内容
     Interstitial,
-    Standalone,
+}
+
+impl Default for ProgramKind {
+    fn default() -> Self {
+        ProgramKind::Primary
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, warn};
 
-use super::messages::{MediaInputAction, MediaInputStatus, ObsVersion};
+use super::messages::{InputInfo, MediaInputAction, MediaInputStatus, ObsVersion};
 use crate::config::ObsWsConfig;
 
 /// Concrete stream type produced by `connect_async` (plain TCP for ws://,
@@ -40,6 +40,7 @@ enum Pending {
     Ack(oneshot::Sender<Result<()>>),
     Status(oneshot::Sender<Result<MediaInputStatus>>),
     Version(oneshot::Sender<Result<ObsVersion>>),
+    Inputs(oneshot::Sender<Result<Vec<InputInfo>>>),
 }
 
 /// Outbound command. `resp` carries the awaited value back to the caller.
@@ -62,6 +63,9 @@ pub enum ObsWsCmd {
     },
     GetVersion {
         resp: oneshot::Sender<Result<ObsVersion>>,
+    },
+    GetInputList {
+        resp: oneshot::Sender<Result<Vec<InputInfo>>>,
     },
 }
 
@@ -183,6 +187,16 @@ impl ObsWsClient {
             .map_err(|_| anyhow!("get_media_input_status response dropped"))?
     }
 
+    /// List every input OBS currently has (name + kind). Lets the admin offer
+    /// a real pick-list for the target Media Source instead of a free-text box
+    /// where a typo means "nothing ever plays".
+    pub async fn get_input_list(&self) -> Result<Vec<InputInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.call(ObsWsCmd::GetInputList { resp: tx }).await?;
+        rx.await
+            .map_err(|_| anyhow!("get_input_list response dropped"))?
+    }
+
     /// Query OBS version (used by /healthz and the admin banner).
     pub async fn get_version(&self) -> Result<ObsVersion> {
         let (tx, rx) = oneshot::channel();
@@ -247,6 +261,7 @@ impl ObsWsClient {
                             ObsWsCmd::TriggerMediaInputAction { .. } => "TriggerMediaInputAction",
                             ObsWsCmd::GetMediaInputStatus { .. } => "GetMediaInputStatus",
                             ObsWsCmd::GetVersion { .. } => "GetVersion",
+                            ObsWsCmd::GetInputList { .. } => "GetInputList",
                         };
                         let data = match &cmd {
                             ObsWsCmd::SetInputSettings { input_name, settings, overlay, .. } => json!({
@@ -256,12 +271,17 @@ impl ObsWsClient {
                             }),
                             ObsWsCmd::TriggerMediaInputAction { input_name, action, .. } => json!({
                                 "inputName": input_name,
-                                "action": action.as_str()
+                                // obs-websocket v5 names this field `mediaAction`
+                                // (not `action`). With the wrong key OBS rejects
+                                // the request, so the source file was swapped
+                                // but playback was never actually triggered.
+                                "mediaAction": action.as_str()
                             }),
                             ObsWsCmd::GetMediaInputStatus { input_name, .. } => json!({
                                 "inputName": input_name
                             }),
                             ObsWsCmd::GetVersion { .. } => Value::Null,
+                            ObsWsCmd::GetInputList { .. } => Value::Null,
                         };
                         // Register before sending so a fast reply can't race us.
                         match cmd {
@@ -274,6 +294,9 @@ impl ObsWsClient {
                             }
                             ObsWsCmd::GetVersion { resp } => {
                                 pending.lock().insert(id, Pending::Version(resp));
+                            }
+                            ObsWsCmd::GetInputList { resp } => {
+                                pending.lock().insert(id, Pending::Inputs(resp));
                             }
                         }
                         let payload = json!({
@@ -364,6 +387,18 @@ fn resolve_response(v: &Value, pending: &Arc<Mutex<HashMap<u64, Pending>>>) {
                 tx.send(Err(anyhow!("obs rejected GetVersion: {comment}")))
             };
         }
+        Pending::Inputs(tx) => {
+            let _ = if ok {
+                let items = data.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let list = items
+                    .into_iter()
+                    .filter_map(|v| serde_json::from_value::<InputInfo>(v).ok())
+                    .collect::<Vec<_>>();
+                tx.send(Ok(list))
+            } else {
+                tx.send(Err(anyhow!("obs rejected GetInputList: {comment}")))
+            };
+        }
     }
 }
 
@@ -376,6 +411,9 @@ fn fail_pending(entry: Pending, msg: String) {
             let _ = tx.send(Err(anyhow!(msg)));
         }
         Pending::Version(tx) => {
+            let _ = tx.send(Err(anyhow!(msg)));
+        }
+        Pending::Inputs(tx) => {
             let _ = tx.send(Err(anyhow!(msg)));
         }
     }

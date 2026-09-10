@@ -570,16 +570,7 @@ impl Scheduler {
         if !std::path::Path::new(&p.file_path).exists() {
             return Err(anyhow::anyhow!("file not found: {}", p.file_path));
         }
-        let settings = json!({
-            "local_file": p.file_path,
-            "is_local_file": true,
-            "looping": false,
-            "restart_on_activate": false,
-            "close_when_inactive": true,
-            "linear_alpha": 0,
-            "speed_percent": 100,
-            "clear_on_media_end": false
-        });
+        let settings = crate::interrupt::settings_payload(&p.file_path);
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
@@ -620,10 +611,23 @@ impl Scheduler {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
+        // Always re-point the source at the file, even if the preload tick was
+        // missed (engine restart, lead-in shorter than the RPC round-trip):
+        // RESTART on its own would just replay whatever was configured before.
+        client
+            .set_input_settings(
+                &self.target_input,
+                crate::interrupt::settings_payload(&p.file_path),
+                true,
+            )
+            .await?;
         client
             .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
             .await?;
-        debug!("triggered RESTART on {}", self.target_input);
+        info!(
+            "cut to '{}' on input '{}' ({}ms)",
+            p.name, self.target_input, p.declared_duration_ms
+        );
         Ok(false)
     }
 }

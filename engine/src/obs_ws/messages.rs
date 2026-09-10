@@ -56,6 +56,17 @@ pub struct MediaInputStatus {
     pub media_kind: String,
 }
 
+/// One entry of `GetInputList`. Used by the admin UI so the operator can pick
+/// the real Media Source name instead of typing it (a typo there silently
+/// means "nothing ever plays").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputInfo {
+    #[serde(rename = "inputName")]
+    pub input_name: String,
+    #[serde(rename = "inputKind", default)]
+    pub input_kind: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ObsVersion {
     pub obs_version: String,

@@ -21,7 +21,7 @@ pub mod codec;
 pub mod messages;
 
 pub use codec::{ObsWsClient, ObsWsCmd};
-pub use messages::{MediaInputAction, MediaInputStatus, ObsVersion, RequestId};
+pub use messages::{InputInfo, MediaInputAction, MediaInputStatus, ObsVersion, RequestId};
 
 use std::sync::Arc;
 

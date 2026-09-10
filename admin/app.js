@@ -12,14 +12,46 @@ const API = {
     playlist: '/api/playlist',
     playlistItem: '/api/playlist/item',
     enable: '/api/scheduler/enable',
+    start: '/api/scheduler/start',
+    reorder: '/api/playlist/reorder',
+    verify: '/api/playlist/verify',
     health: '/healthz',
 };
 
-const PROGRAM_KIND_LABEL = {
-    primary: 'Primary',
-    interstitial: 'Interstitial',
-    standalone: 'Standalone',
-};
+// 节目类型 — 顺序即下拉里的顺序。播放顺序只由时间决定，与类型无关。
+const PROGRAM_KINDS = [
+    ['primary', '正片'],
+    ['public_service', '公益广告'],
+    ['channel_id', '频道ID'],
+    ['preview', '节目预告'],
+    ['promo', '宣传片'],
+    ['interstitial', '插播内容'],
+];
+const PROGRAM_KIND_LABEL = Object.fromEntries(PROGRAM_KINDS);
+
+/// 北京时间显示（播出时间一律按北京时间呈现）。
+function fmtBeijing(ms) {
+    if (ms == null) return '—';
+    try {
+        return new Date(ms).toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            hour12: false,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+    } catch (_) {
+        return new Date(ms).toLocaleString();
+    }
+}
+
+/// 把 <input type="datetime-local"> 的值当作**北京时间**解析成 epoch ms。
+function parseBeijingInput(v) {
+    if (!v) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(v));
+    if (!m) return null;
+    // UTC = 北京时间 - 8h
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5]);
+}
 
 let ws = null;
 let wsReconnectTimer = null;
@@ -104,6 +136,7 @@ async function refreshAll() {
         renderStatus(status);
         renderDashboard(status);
         renderSettingsForm();
+        await verifyPlaylist();
         renderPlaylistRows();
         renderBumpers(bumpersCache);
         if (!document.querySelector('[data-tab="timeline"]').classList.contains('hidden')) {
@@ -265,13 +298,23 @@ function setupDashboardActions() {
 }
 
 async function toggleArmed() {
-    const enable = !(lastSnapshot?.scheduler?.scheduler_running);
+    const running = !!(lastSnapshot && lastSnapshot.scheduler && lastSnapshot.scheduler.scheduler_running);
     try {
-        await apiPost(API.enable, { enabled: enable });
-        log(`已${enable ? '启用' : '停用'}自动播出`);
+        if (running) {
+            await apiPost(API.enable, { enabled: false });
+            log('已停用自动播出');
+        } else {
+            // Arming re-bases the list on *this* moment: later than planned ->
+            // everything 顺延; earlier -> everything 提前. No manual fixups.
+            await apiPost(API.start, {
+                ids: playlistCache.map(p => p.id),
+                from_now: true,
+            });
+            log('已开始自动播出（节目单已按当前时刻对齐）');
+        }
         await refreshAll();
     } catch (e) {
-        log(`toggleArmed failed: ${e}`);
+        log(`切换自动播出失败：${friendlyWriteError(e)}`);
     }
 }
 
@@ -280,10 +323,13 @@ async function toggleArmed() {
 /* -------------------------------------------------------------------------- */
 
 function renderStatus(s) {
+    // The header status pills were removed (ON AIR is the only indicator), so
+    // there is nothing to render here. Kept as a no-op for compatibility.
+    const eng = document.getElementById('status-eng');
+    if (!eng) return;
     // Old engines returned the runtime state under `status`; the current
     // engine (and the /ws snapshot) uses `scheduler`. Accept both.
     const sch = s.scheduler || s.status || {};
-    const eng = document.getElementById('status-eng');
     const obs = document.getElementById('status-obs');
     const cfg = document.getElementById('status-cfg');
     // Plain labels — no coloured status lights (ON AIR is the only lamp).
@@ -407,29 +453,10 @@ function setupPlaylistAdd() {
         });
     }
 
-    document.getElementById('btn-add-program').addEventListener('click', async () => {
-        const nameEl = document.getElementById('playlist-add-name');
-        const pathEl = document.getElementById('playlist-add-path');
-        const name = (nameEl && nameEl.value || '').trim();
-        const path = (pathEl && pathEl.value || '').trim();
-        if (!name || !path) {
-            setPlaylistStatus('请填写节目名称和文件路径（或点「选择文件」挑一个视频）', 'err');
-            return;
-        }
-        setPlaylistStatus('正在新增…');
-        try {
-            const dur = defaultDurationMs();
-            await addProgram(name, path, nextStartAt(dur), dur, selectedKind());
-            if (nameEl) nameEl.value = '';
-            if (pathEl) pathEl.value = '';
-            setPlaylistStatus(`✅ 已新增「${name}」`, 'ok');
-            log(`已新增：${name}`);
-            await refreshAll();
-        } catch (e) {
-            const msg = friendlyWriteError(e);
-            setPlaylistStatus(`新增失败：${msg}`, 'err');
-            log(`新增失败：${msg}`);
-        }
+    // 「新增节目」同样是选文件：名称取文件名、时长自动探测，不让用户手填。
+    document.getElementById('btn-add-program').addEventListener('click', () => {
+        const input = document.getElementById('media-file-input');
+        if (input) input.click();
     });
 
     // Pick a single media file to fill the form.
@@ -437,7 +464,7 @@ function setupPlaylistAdd() {
     const mediaInput = document.getElementById('media-file-input');
     let pickMode = 'fill';
     if (pickBtn && mediaInput) {
-        pickBtn.addEventListener('click', () => { pickMode = 'fill'; mediaInput.click(); });
+        pickBtn.addEventListener('click', () => { pickMode = 'batch'; mediaInput.click(); });
     }
     const importMediaBtn = document.getElementById('btn-import-media');
     if (importMediaBtn && mediaInput) {
@@ -449,46 +476,91 @@ function setupPlaylistAdd() {
             mediaInput.value = '';
             if (!files.length) return;
 
-            if (pickMode === 'fill') {
-                const f = files[0];
-                const nameEl = document.getElementById('playlist-add-name');
-                const pathEl = document.getElementById('playlist-add-path');
-                if (nameEl && !nameEl.value.trim()) {
-                    nameEl.value = f.name.replace(/\.[^.]+$/, '');
-                }
-                if (pathEl) pathEl.value = mediaPathFor(f);
-                setPlaylistStatus(
-                    hasMediaRoot()
-                        ? `已选择：${f.name}（路径已填好，点「新增节目」即可）`
-                        : `已选择：${f.name}。请先在旁边的框里填好文件所在目录，路径才是完整的`,
-                    hasMediaRoot() ? 'ok' : 'err'
-                );
-                return;
+            setPlaylistStatus(`正在读取 ${files.length} 个文件的时长…`);
+            const probed = await Promise.all(files.map(probeMediaFile));
+            const broken = probed.filter(p => !p.ok);
+            if (broken.length) {
+                log(`无法读取（可能损坏或格式不支持）：${broken.map(p => p.file.name).join('、')}`);
             }
 
-            // Batch: one program per selected media file, laid back-to-back.
-            setPlaylistStatus(`正在导入 ${files.length} 个媒体文件…`);
-            const dur = defaultDurationMs();
-            const base = nextStartAt(dur);
+            // Back-to-back in the order they were picked: the channel simply
+            // plays the list top to bottom.
+            let cursor = nextStartAt(0);
             let ok = 0;
-            for (let i = 0; i < files.length; i++) {
-                const f = files[i];
+            for (const item of probed) {
+                const name = item.file.name.replace(/\.[^.]+$/, '');
+                const dur = item.durationMs > 0 ? item.durationMs : 30 * 60 * 1000;
                 try {
-                    await addProgram(
-                        f.name.replace(/\.[^.]+$/, ''),
-                        mediaPathFor(f),
-                        base + i * dur,
-                        dur,
-                        selectedKind()
-                    );
+                    await addProgram(name, mediaPathFor(item.file), cursor, dur, 'primary');
+                    cursor += dur;
                     ok++;
                 } catch (e) {
-                    log(`导入「${f.name}」失败：${friendlyWriteError(e)}`);
+                    log(`导入「${item.file.name}」失败：${friendlyWriteError(e)}`);
                 }
             }
             const tail = hasMediaRoot() ? '' : '（未填媒体目录，路径可能不完整）';
-            setPlaylistStatus(`✅ 已导入 ${ok}/${files.length} 个文件${tail}`, ok ? 'ok' : 'err');
-            log(`媒体文件导入：成功 ${ok}/${files.length}${tail}`);
+            setPlaylistStatus(`✅ 已导入 ${ok}/${files.length} 个文件，时长已自动识别${tail}`, ok ? 'ok' : 'err');
+            log(`导入完成：成功 ${ok}/${files.length}${tail}`);
+            await refreshAll();
+        });
+    }
+
+    // 开播时间（北京时间）→ 按该时刻重排整张节目单
+    const applyStartBtn = document.getElementById('btn-apply-start');
+    if (applyStartBtn) {
+        applyStartBtn.addEventListener('click', async () => {
+            const raw = (document.getElementById('schedule-start-at') || {}).value || '';
+            const base = parseBeijingInput(raw);
+            if (base == null) {
+                setPlaylistStatus('请先选择开播时间（按北京时间填写）', 'err');
+                return;
+            }
+            setPlaylistStatus('正在按开播时间重排…');
+            try {
+                await apiPost('/api/playlist/reorder', {
+                    ids: playlistCache.map(p => p.id),
+                    base_start_ms: base,
+                    from_now: false,
+                });
+                setPlaylistStatus('✅ 已按开播时间重排节目单', 'ok');
+                await refreshAll();
+            } catch (e) {
+                setPlaylistStatus(`重排失败：${friendlyWriteError(e)}`, 'err');
+            }
+        });
+    }
+
+    // 批量勾选 / 批量删除
+    const selectAll = document.getElementById('select-all');
+    if (selectAll) {
+        selectAll.addEventListener('change', () => {
+            document.querySelectorAll('#playlist-tbody input.row-select')
+                .forEach(cb => { cb.checked = selectAll.checked; });
+        });
+    }
+    const delSelected = document.getElementById('btn-delete-selected');
+    if (delSelected) {
+        delSelected.addEventListener('click', async () => {
+            const ids = Array.from(
+                document.querySelectorAll('#playlist-tbody input.row-select:checked')
+            ).map(cb => cb.dataset.id);
+            if (!ids.length) {
+                setPlaylistStatus('请先勾选要删除的节目', 'err');
+                return;
+            }
+            if (!window.confirm(`确定删除选中的 ${ids.length} 条节目？该操作不可撤销。`)) return;
+            let ok = 0;
+            for (const id of ids) {
+                try {
+                    await apiDelete(API.playlistItem, { id });
+                    ok++;
+                } catch (e) {
+                    log(`删除失败：${friendlyWriteError(e)}`);
+                }
+            }
+            setPlaylistStatus(`✅ 已删除 ${ok}/${ids.length} 条`, ok ? 'ok' : 'err');
+            const sa = document.getElementById('select-all');
+            if (sa) sa.checked = false;
             await refreshAll();
         });
     }
@@ -531,6 +603,48 @@ function setupPlaylistAdd() {
             }
         });
     }
+}
+
+/// Read a media file's real duration in the browser (no upload, no ffprobe).
+/// Images have no duration, so they get a short default slot.
+const IMAGE_SLOT_MS = 10_000;
+
+function probeMediaFile(file) {
+    return new Promise((resolve) => {
+        const isImage = /^image\//.test(file.type || '');
+        if (isImage) {
+            resolve({ file: file, durationMs: IMAGE_SLOT_MS, ok: true });
+            return;
+        }
+        let url;
+        try {
+            url = URL.createObjectURL(file);
+        } catch (_) {
+            resolve({ file: file, durationMs: 0, ok: false });
+            return;
+        }
+        const v = document.createElement('video');
+        v.preload = 'metadata';
+        let settled = false;
+        const finish = (ms, ok) => {
+            if (settled) return;
+            settled = true;
+            // Free the blob immediately — dozens of kept object URLs are a
+            // real leak when importing a whole day's worth of programmes.
+            try { URL.revokeObjectURL(url); } catch (_) {}
+            v.removeAttribute('src');
+            v.load();
+            resolve({ file: file, durationMs: ms, ok: ok });
+        };
+        v.onloadedmetadata = () => {
+            const d = v.duration;
+            const good = Number.isFinite(d) && d > 0;
+            finish(good ? Math.round(d * 1000) : 0, good);
+        };
+        v.onerror = () => finish(0, false);
+        setTimeout(() => finish(0, false), 10_000);
+        v.src = url;
+    });
 }
 
 // Parse a playlist file into {name,file_path,start_at_ms?,declared_duration_ms?,kind?}[].
@@ -595,6 +709,35 @@ function timelineItems() {
     return [...playlistCache, ...bumpers];
 }
 
+/// Ids the engine reported as "file missing / blank" — shown as 异常.
+let missingIds = new Set();
+
+async function verifyPlaylist() {
+    try {
+        const r = await apiPost('/api/playlist/verify', {});
+        missingIds = new Set(r.missing || []);
+    } catch (_) {
+        missingIds = new Set();
+    }
+}
+
+/// 播出状态：异常 / 播出中 / 已完成 / 等待中
+function programState(p, sch) {
+    if (missingIds.has(p.id)) return ['异常', 'text-red'];
+    const now = Date.now();
+    const start = p.start_at_ms || 0;
+    const dur = p.detected_duration_ms || p.declared_duration_ms || 0;
+    const end = start + dur;
+    const onAir = sch
+        && sch.current_program_id === p.id
+        && (sch.scheduler_state === 'Playing' || sch.scheduler_state === 'Interstitial');
+    if (onAir || (now >= start && now < end && sch && sch.scheduler_running)) {
+        return ['播出中', 'text-emerald-400'];
+    }
+    if (dur > 0 && now >= end) return ['已完成', 'text-muted'];
+    return ['等待中', 'text-muted'];
+}
+
 function renderPlaylistRows() {
     const tbody = document.getElementById('playlist-tbody');
     tbody.innerHTML = '';
@@ -607,20 +750,26 @@ function renderPlaylistRows() {
         return;
     }
 
+    const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
     playlistCache.forEach((p, i) => {
+        const [stateLabel, stateClass] = programState(p, sch);
+        const durMs = p.detected_duration_ms || p.declared_duration_ms || 0;
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-surface-2 transition';
         tr.innerHTML = `
-            <td class="py-2 pr-2 font-mono text-muted">${i + 1}</td>
-            <td class="py-2 pr-2">${escapeHtml(p.name)}</td>
-            <td class="py-2 pr-2 font-mono text-xs truncate max-w-md">${escapeHtml(p.file_path)}</td>
-            <td class="py-2 pr-2 text-xs">
-                <span class="legend legend-${p.kind}"></span>
-                ${PROGRAM_KIND_LABEL[p.kind] || p.kind}
+            <td class="py-2 pr-2">
+                <input type="checkbox" class="row-select" data-id="${p.id}" aria-label="选择该节目" />
             </td>
-            <td class="py-2 pr-2 font-mono text-xs">${new Date(p.start_at_ms).toLocaleTimeString()}</td>
-            <td class="py-2 pr-2 font-mono text-xs">${msToHMS(p.declared_duration_ms)}</td>
-            <td class="py-2 pr-2 font-mono text-xs text-muted">${p.detected_duration_ms ? msToHMS(p.detected_duration_ms) : '—'}</td>
+            <td class="py-2 pr-2" title="${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>
+            <td class="py-2 pr-2">
+                <select class="form-input row-kind" data-id="${p.id}" style="min-width:108px">
+                    ${PROGRAM_KINDS.map(([v, label]) =>
+                        `<option value="${v}" ${v === p.kind ? 'selected' : ''}>${label}</option>`).join('')}
+                </select>
+            </td>
+            <td class="py-2 pr-2 font-mono text-xs">${msToHMS(durMs)}</td>
+            <td class="py-2 pr-2 font-mono text-xs">${fmtBeijing(p.start_at_ms)}</td>
+            <td class="py-2 pr-2 text-xs ${stateClass}">${stateLabel}</td>
             <td class="py-2 pr-2 text-right">
                 <button class="btn btn-link" data-act="up" data-id="${p.id}"
                         ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
@@ -649,6 +798,22 @@ function renderPlaylistRows() {
             setPlaylistStatus(`调整顺序失败：${friendlyWriteError(e)}`, 'err');
         }
     };
+
+    // 节目类型：行内直接改，改完立即写回引擎
+    tbody.querySelectorAll('select.row-kind').forEach(sel => {
+        sel.addEventListener('change', async () => {
+            const p = playlistCache.find(x => x.id === sel.dataset.id);
+            if (!p) return;
+            setPlaylistStatus('正在更新节目类型…');
+            try {
+                await apiPost(API.playlistItem, { ...p, kind: sel.value });
+                setPlaylistStatus(`✅ 已设为「${PROGRAM_KIND_LABEL[sel.value] || sel.value}」`, 'ok');
+                await refreshAll();
+            } catch (e) {
+                setPlaylistStatus(`更新失败：${friendlyWriteError(e)}`, 'err');
+            }
+        });
+    });
 
     tbody.querySelectorAll('button[data-act]').forEach(b => {
         const id = b.dataset.id;
@@ -679,6 +844,55 @@ function renderPlaylistRows() {
 function setupSettings() {
     document.getElementById('cfg-save').addEventListener('click', saveCfg);
     document.getElementById('cfg-test').addEventListener('click', testCfg);
+    const refreshInputs = document.getElementById('cfg-refresh-inputs');
+    if (refreshInputs) refreshInputs.addEventListener('click', loadObsInputs);
+    loadObsInputs();
+}
+
+/// Fill the target-source picker with the inputs OBS actually has. A typo in
+/// this field is the #1 reason "nothing plays", so never make the user guess.
+async function loadObsInputs() {
+    const sel = document.getElementById('cfg-target-input');
+    if (!sel) return;
+    const current = sel.value || (lastSnapshot && lastSnapshot.target_input) || '';
+    let inputs = [];
+    let err = '';
+    try {
+        const r = await fetch('/api/obs/inputs');
+        const j = await r.json();
+        inputs = j.inputs || [];
+        err = j.error || '';
+    } catch (e) {
+        err = String(e);
+    }
+    // Prefer real media sources; fall back to everything if OBS reports none.
+    const media = inputs.filter(i =>
+        /ffmpeg|vlc|media/i.test(i.inputKind || ''));
+    const list = media.length ? media : inputs;
+
+    sel.innerHTML = '';
+    if (!list.length) {
+        const o = document.createElement('option');
+        o.value = current;
+        o.textContent = current
+            ? `${current}（未取到 OBS 来源列表${err ? '：' + err : ''}）`
+            : `（未取到 OBS 来源列表${err ? '：' + err : ''}）`;
+        sel.appendChild(o);
+    } else {
+        list.forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.inputName;
+            o.textContent = `${i.inputName} · ${i.inputKind || ''}`;
+            sel.appendChild(o);
+        });
+        if (current && !list.some(i => i.inputName === current)) {
+            const o = document.createElement('option');
+            o.value = current;
+            o.textContent = `${current}（OBS 中不存在！）`;
+            sel.appendChild(o);
+        }
+    }
+    if (current) sel.value = current;
 }
 
 // The engine's token is what the OBS Lua script generated on first launch;
@@ -801,6 +1015,9 @@ function startWs() {
                     if (typeof msg.playlist_size === 'number'
                         && msg.playlist_size !== playlistCache.length) {
                         refreshAll();
+                    } else if (!document.querySelector('[data-tab="playlist"]').classList.contains('hidden')) {
+                        // Keep 等待中/播出中/已完成 fresh without re-fetching.
+                        renderPlaylistRows();
                     }
                 }
             } catch (_) {}
