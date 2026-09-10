@@ -232,11 +232,14 @@ impl Scheduler {
                                 // really started. A wrong source name or an
                                 // unsupported file otherwise fails silently and
                                 // the operator just sees "nothing happened".
-                                let sched = self.clone();
+                                // Owned values only — `&self` cannot escape into
+                                // the spawned task.
+                                let obs = self.obs.clone();
+                                let input = self.target_input.clone();
                                 let st = state.clone();
                                 let pname = p.name.clone();
                                 tokio::spawn(async move {
-                                    sched.confirm_playback(st, pname).await;
+                                    Scheduler::confirm_playback(obs, input, st, pname).await;
                                 });
                             }
                             Err(e) => {
@@ -578,23 +581,30 @@ impl Scheduler {
     /// 1.5 s after a cut, verify with OBS that the media is actually playing.
     /// This is the difference between "silently nothing happened" and a clear
     /// message in the admin activity log.
-    async fn confirm_playback(&self, state: crate::AppState, program_name: String) {
+    ///
+    /// Takes owned values (not `&self`) so it can be moved into a spawned task.
+    async fn confirm_playback(
+        obs: ClientHandle,
+        target_input: String,
+        state: crate::AppState,
+        program_name: String,
+    ) {
         tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
-        let Some(client) = self.client() else { return };
-        match client.get_media_input_status(&self.target_input).await {
+        let Some(client) = obs.current() else { return };
+        match client.get_media_input_status(&target_input).await {
             Ok(s) => {
                 let st = s.media_state.to_ascii_uppercase();
                 if st.contains("PLAYING") || st.contains("OPENING") || st.contains("BUFFERING") {
                     info!(
                         "playback confirmed for '{}' on input '{}' (state={}, {}ms)",
-                        program_name, self.target_input, s.media_state, s.media_duration
+                        program_name, target_input, s.media_state, s.media_duration
                     );
                     let mut guard = state.status.write();
                     guard.last_error = None;
                 } else {
                     let msg = format!(
                         "OBS 报告媒体源 '{}' 未开始播放（mediaState={}），请确认目标源是媒体源、名字与下拉里的一致，且文件格式受 OBS 支持",
-                        self.target_input, s.media_state
+                        target_input, s.media_state
                     );
                     warn!("{}", msg);
                     let mut guard = state.status.write();
@@ -604,12 +614,12 @@ impl Scheduler {
             Err(e) => {
                 warn!(
                     "播放确认失败（媒体源 '{}' 可能不存在或不是媒体源）：{:#}",
-                    self.target_input, e
+                    target_input, e
                 );
                 let mut guard = state.status.write();
                 guard.last_error = Some(format!(
                     "无法查询媒体源 '{}' 的播放状态：{e}（目标源名可能不对，请在设置页用下拉选择）",
-                    self.target_input
+                    target_input
                 ));
             }
         }
