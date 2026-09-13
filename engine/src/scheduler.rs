@@ -811,17 +811,6 @@ impl Scheduler {
         );
     }
 
-/// The program that follows `id` in playlist order, if any.
-///
-/// Time-based lookup (`next_program`) is the wrong tool for advancing a running
-/// schedule: when a programme's real duration drifts from its declared one,
-/// `now` has already moved past the next row's `start_at`, so the row gets
-/// filtered out and the engine silently skips it.
-fn program_after<'a>(cfg: &'a Config, id: &str) -> Option<&'a ProgramEntry> {
-    let idx = cfg.playlist.items.iter().position(|p| p.id == id)?;
-    cfg.playlist.items.get(idx + 1)
-}
-
     fn refresh_remaining(&self, state: &crate::AppState, p: &ProgramEntry, remaining_ms: i64) {
         let mut st = state.status.write();
         st.current_program_id = Some(p.id.clone());
@@ -1086,4 +1075,16 @@ fn program_after<'a>(cfg: &'a Config, id: &str) -> Option<&'a ProgramEntry> {
         );
         Ok(false)
     }
+}
+
+/// The program that follows `id` in **playlist order**, if any.
+///
+/// Time-based lookup (`next_program`) is the wrong tool for advancing a running
+/// schedule: when a programme's real duration drifts from its declared one,
+/// `now` has already moved past the next row's `start_at`, so the row gets
+/// filtered out and the engine silently skips it — the source kept showing the
+/// old (finished) file while the UI claimed the next programme was on air.
+fn program_after<'a>(cfg: &'a Config, id: &str) -> Option<&'a ProgramEntry> {
+    let idx = cfg.playlist.items.iter().position(|p| p.id == id)?;
+    cfg.playlist.items.get(idx + 1)
 }
