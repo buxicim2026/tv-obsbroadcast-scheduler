@@ -11,6 +11,7 @@ pub mod playlist;
 pub mod scheduler;
 pub mod server;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,6 +52,24 @@ pub struct AppState {
     /// Lets HTTP handlers query OBS itself — e.g. list the inputs so the admin
     /// can pick the target Media Source by name instead of typing it.
     pub obs_client: Arc<parking_lot::Mutex<Option<crate::obs_ws::ClientHandle>>>,
+    /// Transport-panel commands (pause / resume / next / reload) handed to the
+    /// scheduler loop. The HTTP layer only *enqueues*; the scheduler owns the
+    /// state machine and is the only place that may mutate it, so buttons can
+    /// never race with a tick.
+    pub control: Arc<parking_lot::Mutex<VecDeque<ControlCommand>>>,
+}
+
+/// What the transport buttons in the admin console ask the scheduler to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlCommand {
+    /// Freeze the timeline and pause the media source in OBS.
+    Pause,
+    /// Undo `Pause`: resume OBS playback and re-anchor the end time.
+    Resume,
+    /// Cut to the next program immediately, discarding the rest of this one.
+    Next,
+    /// Re-read `config.json` from disk and re-anchor the timeline to now.
+    Reload,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +87,7 @@ impl AppState {
             status: Arc::new(RwLock::new(AppStatus::default())),
             notify,
             obs_client: Arc::new(parking_lot::Mutex::new(None)),
+            control: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
         }
     }
 }

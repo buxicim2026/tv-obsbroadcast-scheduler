@@ -110,6 +110,9 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
             post(schedule_api::enable_scheduler),
         )
         .route("/api/scheduler/start", post(schedule_api::start_scheduler))
+        .route("/api/scheduler/pause", post(schedule_api::pause_scheduler))
+        .route("/api/scheduler/next", post(schedule_api::skip_to_next))
+        .route("/api/scheduler/reload", post(schedule_api::reload_config))
         .route("/ws", get(ws_push::ws_handler))
         // axum caps buffered request bodies at 2 MiB by default, which silently
         // rejected every media upload (a single video is far bigger). The
@@ -167,6 +170,9 @@ async fn index() -> &'static str {
      DEL  /api/playlist/item    delete a program item\n\
      POST /api/scheduler/enable arm / disarm the scheduler
      POST /api/scheduler/start   re-base on now + arm (顺延/提前)
+     POST /api/scheduler/pause   pause / resume the transport
+     POST /api/scheduler/next    cut to the next programme now
+     POST /api/scheduler/reload  re-read config.json and re-anchor
      POST /api/playlist/reorder  re-sequence rows back-to-back
      POST /api/playlist/verify   report rows whose media file is missing\n\
      POST /api/bootstrap        one-time C-plugin -> engine bootstrap\n\

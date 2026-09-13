@@ -138,6 +138,7 @@ enum SchedulerState {
     Idle,
     Armed { target_id, fire_at },                           // 等下一档
     Playing { current_id, started_at, end_at },             // 当前正片
+    Paused { current_id, remaining_ms },                    // 暂停：画面与计时都冻结
     InterstitialPlaying { main_id, bumper_id, main_resume_offset_ms },
     Error { ... },
 }

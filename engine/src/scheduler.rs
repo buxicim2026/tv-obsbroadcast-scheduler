@@ -27,8 +27,19 @@ use tracing::{debug, info, warn};
 
 use crate::config::{Config, MissingFilePolicy, ProgramEntry};
 use crate::obs_ws::{ClientHandle, MediaInputAction, ObsWsClient};
+use crate::ControlCommand;
 
 const TICK_MS: u64 = 50;
+
+/// How long to wait between re-pointing the media source at a new file and
+/// telling it to play. OBS re-opens the decoder asynchronously; firing RESTART
+/// in the same instant hit a source that was still swapping files, so the
+/// action was dropped and the channel went black while the UI already showed
+/// the next programme. 300ms is comfortably above the swap on a local SSD.
+const SWITCH_SETTLE_MS: u64 = 300;
+
+/// Watchdog throttle: check what OBS is actually doing about once a second.
+static LAST_WATCHDOG_MS: AtomicI64 = AtomicI64::new(0);
 
 /// Throttle for the "program vanished from the playlist" warning: without it
 /// the scheduler emitted ~20 identical warnings per second forever.
@@ -42,7 +53,15 @@ pub enum SchedulerState {
     /// Not armed. No timeline progression.
     Idle,
     /// Will fire `SetInputSettings(target_input, next)` at `fire_at_ms`.
-    Armed { target_id: String, fire_at_ms: i64 },
+    Armed {
+        target_id: String,
+        fire_at_ms: i64,
+        /// Set once `SetInputSettings` has been sent for this target. Without
+        /// it the tick re-sent the request ~20x/s throughout the lead-in and
+        /// OBS kept re-opening the file underneath the switch that followed.
+        #[serde(default)]
+        preloaded: bool,
+    },
     /// Currently driving a program. `started_at_ms` is when this program
     /// began playing and `end_at_ms` is the absolute wall-clock time it is
     /// considered over (an explicit value, because a bumper that replays the
@@ -51,6 +70,14 @@ pub enum SchedulerState {
         program_id: String,
         started_at_ms: i64,
         end_at_ms: i64,
+    },
+    /// The operator pressed Pause: OBS is paused and the timeline is frozen.
+    /// `remaining_ms` is what was left of the program at the moment we paused,
+    /// so resuming re-anchors the end time instead of silently dropping the
+    /// rest of the programme.
+    Paused {
+        program_id: String,
+        remaining_ms: i64,
     },
     /// A bumper is on air in the middle of `primary_id`. When it ends we cut
     /// back to the primary at `return_to_ms` (its offset inside the primary).
@@ -69,6 +96,7 @@ impl SchedulerState {
             SchedulerState::Idle => "Idle",
             SchedulerState::Armed { .. } => "Armed",
             SchedulerState::Playing { .. } => "Playing",
+            SchedulerState::Paused { .. } => "Paused",
             SchedulerState::InterstitialPlaying { .. } => "Interstitial",
             SchedulerState::Error { .. } => "Error",
         }
@@ -79,6 +107,7 @@ impl SchedulerState {
     pub fn current_program_id(&self) -> Option<&str> {
         match self {
             SchedulerState::Playing { program_id, .. } => Some(program_id.as_str()),
+            SchedulerState::Paused { program_id, .. } => Some(program_id.as_str()),
             SchedulerState::Armed { target_id, .. } => Some(target_id.as_str()),
             SchedulerState::InterstitialPlaying { primary_id, .. } => Some(primary_id.as_str()),
             SchedulerState::Idle | SchedulerState::Error { .. } => None,
@@ -129,6 +158,25 @@ impl Scheduler {
             if ticks % 20 == 0 {
                 cfg_snapshot = Arc::new(state.config.read().clone());
             }
+
+            // Transport commands from the console (pause / resume / next /
+            // reload). Drained here — in the task that owns the state machine —
+            // so a button press can never race with a tick, and handled before
+            // the `want_running` gate so Reload also works while disarmed.
+            let mut cmds = Vec::new();
+            {
+                let mut q = state.control.lock();
+                while let Some(c) = q.pop_front() {
+                    cmds.push(c);
+                }
+            }
+            if !cmds.is_empty() {
+                for c in cmds {
+                    self.handle_command(c, &state, &cfg_snapshot, &mut machine)
+                        .await;
+                }
+                cfg_snapshot = Arc::new(state.config.read().clone());
+            }
             // Snapshot config so we don't hold the lock across awaits.
             // Take the two locks one at a time (never nested) to keep the
             // lock ordering consistent with the rest of the engine.
@@ -153,6 +201,7 @@ impl Scheduler {
                         st.current_program_id = None;
                         st.current_program_name = None;
                         st.current_remaining_ms = None;
+                        st.paused = false;
                     }
                 }
                 prev_active = false;
@@ -194,6 +243,168 @@ impl Scheduler {
         }
     }
 
+    /// Transport commands from the admin console. Runs inside the scheduler
+    /// task, which is the only place allowed to mutate the state machine.
+    async fn handle_command(
+        &self,
+        cmd: ControlCommand,
+        state: &crate::AppState,
+        cfg: &Config,
+        machine: &mut SchedulerState,
+    ) {
+        let now_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
+        match cmd {
+            ControlCommand::Pause => {
+                if matches!(machine, SchedulerState::Paused { .. }) {
+                    return;
+                }
+                let Some(pid) = machine.current_program_id().map(|s| s.to_string()) else {
+                    warn!("pause ignored: nothing on air");
+                    return;
+                };
+                let remaining = match machine {
+                    SchedulerState::Playing { end_at_ms, .. } => end_at_ms.saturating_sub(now_ms),
+                    _ => cfg
+                        .playlist
+                        .items
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| p.declared_duration_ms as i64)
+                        .unwrap_or(0),
+                }
+                .max(0);
+                if let Some(client) = self.client() {
+                    if let Err(e) = client
+                        .trigger_media_input_action(&self.target_input, MediaInputAction::Pause)
+                        .await
+                    {
+                        warn!("pause: OBS rejected the action: {e}");
+                    }
+                }
+                self.apply_state(
+                    state,
+                    machine,
+                    SchedulerState::Paused {
+                        program_id: pid.clone(),
+                        remaining_ms: remaining,
+                    },
+                );
+                state.status.write().paused = true;
+                info!("transport: paused ({remaining}ms left of {pid})");
+            }
+            ControlCommand::Resume => {
+                let (pid, remaining) = match machine {
+                    SchedulerState::Paused {
+                        program_id,
+                        remaining_ms,
+                    } => (program_id.clone(), *remaining_ms),
+                    _ => {
+                        debug!("resume ignored: transport is not paused");
+                        return;
+                    }
+                };
+                if let Some(client) = self.client() {
+                    if let Err(e) = client
+                        .trigger_media_input_action(&self.target_input, MediaInputAction::Play)
+                        .await
+                    {
+                        warn!("resume: OBS rejected PLAY: {e}");
+                    }
+                }
+                let name = cfg
+                    .playlist
+                    .items
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                let end_at = now_ms.saturating_add(remaining);
+                self.transition_to_playing(state, &pid, &name, remaining, now_ms, end_at, machine);
+                state.status.write().paused = false;
+                info!("transport: resumed '{name}' with {remaining}ms left");
+            }
+            ControlCommand::Next => {
+                // Playlist order, not wall clock — see `program_after`.
+                let next = machine
+                    .current_program_id()
+                    .and_then(|id| program_after(cfg, id))
+                    .or_else(|| crate::playlist::next_program(cfg, now_ms));
+                let Some(next) = next else {
+                    warn!("skip ignored: the playlist has no later program");
+                    state.status.write().last_error =
+                        Some("已经在最后一档，没有下一档可跳".to_string());
+                    return;
+                };
+                match self.cut_to(cfg, next).await {
+                    Ok(false) => {
+                        let dur = next.declared_duration_ms as i64;
+                        let end_at = now_ms.saturating_add(dur);
+                        self.transition_to_playing(
+                            state,
+                            &next.id,
+                            &next.name,
+                            dur,
+                            now_ms,
+                            end_at,
+                            machine,
+                        );
+                        let mut st = state.status.write();
+                        st.paused = false;
+                        st.last_error = None;
+                        info!("transport: skipped to '{}'", next.name);
+                    }
+                    Ok(true) => {
+                        // Missing file + SkipToNext — don't land on a black
+                        // source, arm for the one after it instead.
+                        warn!("skip: '{}' has no media file; arming past it", next.name);
+                        let lead_in = cfg.scheduler.lead_in_ms as i64;
+                        match crate::playlist::next_program(
+                            cfg,
+                            next.start_at_ms.saturating_add(1),
+                        ) {
+                            Some(n2) => {
+                                let fire_at = n2.start_at_ms.saturating_sub(lead_in);
+                                self.transition_to_armed(state, n2, fire_at, machine);
+                            }
+                            None => self.become_idle(state, machine),
+                        }
+                    }
+                    Err(e) => {
+                        warn!("skip to next failed: {e}");
+                        state.status.write().last_error = Some(format!("跳到下一档失败：{e}"));
+                    }
+                }
+            }
+            ControlCommand::Reload => {
+                let path = crate::config_path();
+                match tokio::task::spawn_blocking(move || Config::load_or_init(&path)).await {
+                    Ok(Ok(new_cfg)) => {
+                        *state.config.write() = new_cfg;
+                        {
+                            let mut st = state.status.write();
+                            st.paused = false;
+                            st.last_error = None;
+                            st.current_program_id = None;
+                            st.current_program_name = None;
+                            st.current_remaining_ms = None;
+                        }
+                        // Drop back to Idle: the next tick re-anchors onto the
+                        // freshly loaded timeline (see `interrupt::recover`).
+                        self.become_idle(state, machine);
+                        let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+                        let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);
+                        info!("transport: reloaded config.json from disk");
+                    }
+                    Ok(Err(e)) => {
+                        warn!("reload failed: {e}");
+                        state.status.write().last_error = Some(format!("重新载入失败：{e}"));
+                    }
+                    Err(e) => warn!("reload task join failed: {e}"),
+                }
+            }
+        }
+    }
+
     async fn tick_once(&self, state: &crate::AppState, cfg: &Config, machine: &mut SchedulerState) {
         let now_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
 
@@ -212,17 +423,20 @@ impl Scheduler {
             SchedulerState::Armed {
                 target_id,
                 fire_at_ms,
+                preloaded,
             } => {
                 let target_id = target_id.clone();
                 let fire_at = *fire_at_ms;
                 if let Some(p) = cfg.playlist.items.iter().find(|p| p.id == target_id) {
-                    if now_ms >= fire_at {
+                    if now_ms >= fire_at && !*preloaded {
                         // Issue SetInputSettings NOW so OBS has the decoder
-                        // warm by the time we RESTART.
+                        // warm by the time we RESTART — but only once. Re-sending
+                        // it every tick made OBS re-open the file continuously.
                         if let Err(e) = self.preload(p).await {
                             self.transition_to_error(state, &format!("preload: {e}"), machine);
                             return;
                         }
+                        *preloaded = true;
                     }
                     if now_ms >= p.start_at_ms {
                         match self.cut_to(cfg, p).await {
@@ -246,19 +460,8 @@ impl Scheduler {
                             }
                             Ok(false) => {
                                 // Fire-and-forget: ask OBS whether the media
-                                // really started. A wrong source name or an
-                                // unsupported file otherwise fails silently and
-                                // the operator just sees "nothing happened".
-                                // Owned values only — `&self` cannot escape into
-                                // the spawned task.
-                                let obs = self.obs.clone();
-                                let input = self.target_input.clone();
-                                let fpath = p.file_path.clone();
-                                let st = state.clone();
-                                let pname = p.name.clone();
-                                tokio::spawn(async move {
-                                    Scheduler::confirm_playback(obs, input, fpath, st, pname).await;
-                                });
+                                // really started (see `confirm_playback`).
+                                self.spawn_playback_confirm(state, p);
                             }
                             Err(e) => {
                                 self.transition_to_error(state, &format!("cut: {e}"), machine);
@@ -304,6 +507,14 @@ impl Scheduler {
                 // read the real duration back so the UI can show it.
                 if p.detected_duration_ms.is_none() && into_program_ms > 1500 {
                     self.probe_duration(state, p).await;
+                }
+
+                // Watchdog: verify OBS is really playing what the timeline
+                // thinks is on air. This is what recovers a black screen after
+                // a switch, and it also cuts on early when a file is shorter
+                // than its declared duration.
+                if into_program_ms > 2_000 {
+                    self.watchdog(cfg, p, into_program_ms, machine).await;
                 }
 
                 // ---- Bumper detection -------------------------------------
@@ -353,15 +564,48 @@ impl Scheduler {
                     // Clock went backwards (NTP step / user offset). Stay put.
                     warn!("clock skew negative on Playing; holding program {}", p.name);
                 } else if now_ms >= end {
-                    // Find next program.
-                    match crate::playlist::next_program(cfg, now_ms) {
-                        Some(next) => {
-                            self.preload_if_soon(next, cfg, now_ms);
-                            let fire_at = next
-                                .start_at_ms
-                                .saturating_sub(cfg.scheduler.lead_in_ms as i64);
+                    // Advance in *playlist order*, not by wall clock. A
+                    // time-based lookup (`next_program`) skipped rows whenever a
+                    // file ran shorter or longer than its declared duration: by
+                    // the time we got here `now` had already passed the next
+                    // row's `start_at`, so it got filtered out and we jumped two
+                    // programmes ahead (or nowhere at all) — the source went
+                    // black while the UI claimed the next programme was on air.
+                    match program_after(cfg, &program_id) {
+                        Some(next) if next.start_at_ms > now_ms => {
+                            // A real gap in the schedule: hold, and cut on time
+                            // rather than airing this row early.
+                            let fire_at = next.start_at_ms.saturating_sub(lead_in);
                             self.transition_to_armed(state, next, fire_at, machine);
                         }
+                        Some(next) => match self.cut_to(cfg, next).await {
+                            Ok(false) => {
+                                let dur = next.declared_duration_ms as i64;
+                                let end_at = now_ms.saturating_add(dur);
+                                self.transition_to_playing(
+                                    state, &next.id, &next.name, dur, now_ms, end_at, machine,
+                                );
+                                self.spawn_playback_confirm(state, next);
+                            }
+                            Ok(true) => {
+                                // Missing file + SkipToNext: don't sit on a
+                                // dead source, arm for the one after it.
+                                warn!(
+                                    "skipping missing program {} ({})",
+                                    next.name, next.file_path
+                                );
+                                match program_after(cfg, &next.id) {
+                                    Some(n2) => {
+                                        let fire_at = n2.start_at_ms.saturating_sub(lead_in);
+                                        self.transition_to_armed(state, n2, fire_at, machine);
+                                    }
+                                    None => self.become_idle(state, machine),
+                                }
+                            }
+                            Err(e) => {
+                                self.transition_to_error(state, &format!("cut: {e}"), machine);
+                            }
+                        },
                         None => {
                             // Schedule ended; loop in Idle until user re-arms.
                             info!("schedule exhausted past {}", p.name);
@@ -371,6 +615,10 @@ impl Scheduler {
                 } else {
                     self.refresh_remaining(state, p, end.saturating_sub(now_ms));
                 }
+            }
+            SchedulerState::Paused { .. } => {
+                // The operator froze the transport: hold the frame and the
+                // remaining time until a Resume command arrives.
             }
             SchedulerState::InterstitialPlaying {
                 primary_id,
@@ -468,6 +716,7 @@ impl Scheduler {
             SchedulerState::Armed {
                 target_id: p.id.clone(),
                 fire_at_ms,
+                preloaded: false,
             },
         );
     }
@@ -562,11 +811,100 @@ impl Scheduler {
         );
     }
 
+/// The program that follows `id` in playlist order, if any.
+///
+/// Time-based lookup (`next_program`) is the wrong tool for advancing a running
+/// schedule: when a programme's real duration drifts from its declared one,
+/// `now` has already moved past the next row's `start_at`, so the row gets
+/// filtered out and the engine silently skips it.
+fn program_after<'a>(cfg: &'a Config, id: &str) -> Option<&'a ProgramEntry> {
+    let idx = cfg.playlist.items.iter().position(|p| p.id == id)?;
+    cfg.playlist.items.get(idx + 1)
+}
+
     fn refresh_remaining(&self, state: &crate::AppState, p: &ProgramEntry, remaining_ms: i64) {
         let mut st = state.status.write();
         st.current_program_id = Some(p.id.clone());
         st.current_program_name = Some(p.name.clone());
         st.current_remaining_ms = Some(remaining_ms);
+    }
+
+    /// Ask OBS what the media source is *really* doing, about once a second,
+    /// and repair the two ways a live channel ends up showing black:
+    ///
+    ///   * the file finished early (`ENDED`) — pull this programme's end time in
+    ///     so the next tick cuts to the following one, instead of sitting on a
+    ///     frozen frame until the declared duration elapses;
+    ///   * the switch never took (`STOPPED` / `NONE` / `PAUSED`) — re-apply the
+    ///     file and restart the source.
+    ///
+    /// A media source holds exactly one file, so without this a failed switch is
+    /// silently permanent: the timeline moves on, the picture never does.
+    async fn watchdog(
+        &self,
+        cfg: &Config,
+        p: &ProgramEntry,
+        into_ms: i64,
+        machine: &mut SchedulerState,
+    ) {
+        let now = Utc::now().timestamp_millis();
+        if now - LAST_WATCHDOG_MS.load(Ordering::Relaxed) < 1_000 {
+            return;
+        }
+        LAST_WATCHDOG_MS.store(now, Ordering::Relaxed);
+
+        let Some(client) = self.client() else { return };
+        let Ok(s) = client.get_media_input_status(&self.target_input).await else {
+            return;
+        };
+        let st = s.media_state.to_ascii_uppercase();
+        if st.contains("PLAYING") || st.contains("OPENING") || st.contains("BUFFERING") {
+            return;
+        }
+
+        if st.contains("ENDED") {
+            let declared = p.declared_duration_ms as i64;
+            if into_ms < declared.saturating_sub(1_500) {
+                warn!(
+                    "'{}' ended after {}ms but is scheduled for {}ms; cutting on early",
+                    p.name, into_ms, declared
+                );
+                if let SchedulerState::Playing { end_at_ms, .. } = machine {
+                    *end_at_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
+                }
+            }
+            return;
+        }
+
+        warn!(
+            "watchdog: source '{}' is {} {}ms into '{}'; re-applying the file and restarting",
+            self.target_input, s.media_state, into_ms, p.name
+        );
+        let _ = client
+            .set_input_settings(
+                &self.target_input,
+                crate::interrupt::settings_payload(&p.file_path),
+                true,
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
+        let _ = client
+            .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
+            .await;
+    }
+
+    /// Fire-and-forget check that a cut actually reached OBS (see
+    /// `confirm_playback`). Owned values only — `&self` cannot escape into the
+    /// spawned task.
+    fn spawn_playback_confirm(&self, state: &crate::AppState, p: &ProgramEntry) {
+        let obs = self.obs.clone();
+        let input = self.target_input.clone();
+        let fpath = p.file_path.clone();
+        let st = state.clone();
+        let pname = p.name.clone();
+        tokio::spawn(async move {
+            Scheduler::confirm_playback(obs, input, fpath, st, pname).await;
+        });
     }
 
     /// Ask OBS how long the file really is and store it on the playlist entry.
@@ -701,15 +1039,6 @@ impl Scheduler {
             .await
     }
 
-    async fn preload_if_soon(&self, p: &ProgramEntry, cfg: &Config, now_ms: i64) {
-        let fire_at = p.start_at_ms.saturating_sub(cfg.scheduler.lead_in_ms as i64);
-        if now_ms >= fire_at && now_ms < p.start_at_ms {
-            if let Err(e) = self.preload(p).await {
-                warn!("preload ahead-of-fire failed for {}: {}", p.name, e);
-            }
-        }
-    }
-
     /// Hard-cut to `p`.
     ///
     /// Returns `Ok(true)` when the media file is missing and the configured
@@ -743,6 +1072,11 @@ impl Scheduler {
                 true,
             )
             .await?;
+        // Give OBS a moment to actually open the new file. RESTART sent in the
+        // same instant as the `local_file` change was landing on a source that
+        // was mid-swap, and the action was dropped — the channel stayed black
+        // (a media source holds one file, so nothing else would ever play).
+        tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
         client
             .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
             .await?;

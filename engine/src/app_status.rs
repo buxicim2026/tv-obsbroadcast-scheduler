@@ -13,6 +13,10 @@ pub struct AppStatus {
     pub obs_error: Option<String>,
     /// True if the user-enabled scheduler is actively driving the scene.
     pub scheduler_running: bool,
+    /// True while the operator has paused the transport (OBS is paused and the
+    /// timeline is frozen). Kept separate from `scheduler_running` so the UI
+    /// can show "paused" without losing the fact that we're still on air.
+    pub paused: bool,
     /// Current scheduler state (mirrored from `SchedulerState` enum, kept as
     /// string for JSON friendliness).
     pub scheduler_state: String,

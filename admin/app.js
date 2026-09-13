@@ -13,6 +13,9 @@ const API = {
     playlistItem: '/api/playlist/item',
     enable: '/api/scheduler/enable',
     start: '/api/scheduler/start',
+    pause: '/api/scheduler/pause',
+    next: '/api/scheduler/next',
+    reload: '/api/scheduler/reload',
     reorder: '/api/playlist/reorder',
     verify: '/api/playlist/verify',
     upload: '/api/playlist/upload',
@@ -320,8 +323,17 @@ function renderConsole(s) {
     setText('sb-count', String(playlistCache.length));
     setText('ctl-info-total', msToHMS(total));
     setText('ctl-sb-total', msToHMS(total));
-    setText('sb-state', running ? (sch.scheduler_state === 'Interstitial' ? '插播中' : '播出中') : '待机');
-    setText('ctl-onair-text', running ? 'ON AIR' : '待机');
+    const paused = !!sch.paused;
+    setText('sb-state', !running ? '待机'
+        : (paused ? '暂停' : (sch.scheduler_state === 'Interstitial' ? '插播中' : '播出中')));
+    setText('ctl-onair-text', !running ? '待机' : (paused ? 'PAUSED' : 'ON AIR'));
+
+    // 暂停键是双态的：播出中显示「暂停」，暂停中显示「继续」。
+    const pauseBtn = document.getElementById('btn-pause');
+    if (pauseBtn) {
+        pauseBtn.textContent = paused ? '继续' : '暂停';
+        pauseBtn.classList.toggle('on', paused);
+    }
     setText('ctl-info-current', sch.current_program_name || '—');
     setText('sb-obs', sch.obs_connected ? '已连接' : '未连接');
 
@@ -370,11 +382,32 @@ function clearUpcoming() {
 
 function setupDashboardActions() {
     document.getElementById('btn-armed').addEventListener('click', toggleArmed);
-    document.getElementById('btn-pause').addEventListener('click', () => {
-        log('暂停功能将在下一版本接通（引擎侧 /api/scheduler/pause）');
+    document.getElementById('btn-pause').addEventListener('click', async () => {
+        const paused = !!(lastSnapshot && lastSnapshot.scheduler && lastSnapshot.scheduler.paused);
+        const b = document.getElementById('btn-pause');
+        if (b) b.disabled = true;
+        try {
+            await apiPost(API.pause, { paused: !paused });
+            log(paused ? '已继续播出' : '已暂停播出（画面暂停，计时已冻结）');
+            await refreshAll();
+        } catch (e) {
+            log(`暂停/继续失败：${e.message}`, 'warn');
+        } finally {
+            if (b) b.disabled = false;
+        }
     });
-    document.getElementById('btn-next').addEventListener('click', () => {
-        log('跳到下一档将在下一版本接通（引擎侧 /api/scheduler/next）');
+    document.getElementById('btn-next').addEventListener('click', async () => {
+        const b = document.getElementById('btn-next');
+        if (b) { b.disabled = true; b.textContent = '切换中…'; }
+        try {
+            await apiPost(API.next, {});
+            log('已跳到下一档');
+            await refreshAll();
+        } catch (e) {
+            log(`跳档失败：${e.message}`, 'warn');
+        } finally {
+            if (b) { b.disabled = false; b.textContent = '下一档'; }
+        }
     });
     document.getElementById('btn-restart').addEventListener('click', async () => {
         const b = document.getElementById('btn-restart');
@@ -405,8 +438,26 @@ function setupDashboardActions() {
             document.querySelector('.nav-tab[data-tab="playlist"]')?.click();
         });
     }
+    // 「重新载入」不只是刷新页面：它让引擎重读磁盘上的 config.json，
+    // 这样在面板外（手工改文件）的改动也会生效，并重算时间轴。
     const ctlReload = document.getElementById('ctl-reload');
-    if (ctlReload) ctlReload.addEventListener('click', () => refreshAll());
+    if (ctlReload) {
+        ctlReload.addEventListener('click', async () => {
+            const original = ctlReload.textContent;
+            ctlReload.disabled = true;
+            ctlReload.textContent = '载入中…';
+            try {
+                await apiPost(API.reload, {});
+                await refreshAll();
+                log('已重新载入 config.json，时间轴已对齐当前时间');
+            } catch (e) {
+                log(`重新载入失败：${e.message}`, 'warn');
+            } finally {
+                ctlReload.disabled = false;
+                ctlReload.textContent = original;
+            }
+        });
+    }
     const ctlClearLog = document.getElementById('ctl-clear-log');
     if (ctlClearLog) {
         ctlClearLog.addEventListener('click', () => {

@@ -533,6 +533,61 @@ fn chrono_now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PausePayload {
+    pub paused: bool,
+}
+
+/// Pause / resume the transport. This handler only enqueues the command — the
+/// scheduler loop owns the state machine and does the real work on its next
+/// tick, which is why the button feels instant and can't race a switch.
+pub async fn pause_scheduler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<PausePayload>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    if !state.config.read().scheduler.enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            "播出未启用：请先点「启用自动播出」".to_string(),
+        ));
+    }
+    state.control.lock().push_back(if payload.paused {
+        crate::ControlCommand::Pause
+    } else {
+        crate::ControlCommand::Resume
+    });
+    Ok(Json(json!({"ok": true, "paused": payload.paused})))
+}
+
+/// Cut to the next programme immediately, discarding the rest of this one.
+pub async fn skip_to_next(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    if !state.config.read().scheduler.enabled {
+        return Err((StatusCode::CONFLICT, "播出未启用：无法跳档".to_string()));
+    }
+    state.control.lock().push_back(crate::ControlCommand::Next);
+    Ok(Json(json!({"ok": true})))
+}
+
+/// Re-read `config.json` from disk and re-anchor the timeline onto now. Unlike
+/// a plain UI refresh this also picks up edits made outside the panel.
+pub async fn reload_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    state
+        .control
+        .lock()
+        .push_back(crate::ControlCommand::Reload);
+    Ok(Json(json!({"ok": true})))
+}
+
 pub async fn enable_scheduler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
