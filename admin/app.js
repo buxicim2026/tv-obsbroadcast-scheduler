@@ -86,6 +86,8 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     refreshAll();
     startWs();
+    tickClock();
+    setInterval(tickClock, 1000);
 });
 
 // Friendly banner: the message is meant for a human, the stack goes to the
@@ -138,6 +140,7 @@ async function refreshAll() {
         bumpersCache = playlist.bumpers || [];
         renderStatus(status);
         renderDashboard(status);
+        renderConsole(status);
         renderSettingsForm();
         await verifyPlaylist();
         renderPlaylistRows();
@@ -257,6 +260,106 @@ function renderDashboard(s) {
     }
 }
 
+/* ---------------------- 播控台（电视台风格主界面） ---------------------- */
+
+function setText(id, v) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+}
+
+function upcomingProgram() {
+    const now = Date.now();
+    return playlistCache
+        .filter(p => (p.start_at_ms || 0) > now)
+        .sort((a, b) => a.start_at_ms - b.start_at_ms)[0] || null;
+}
+
+function fmtCountdown(ms) {
+    if (ms == null || ms < 0) return '00:00:00';
+    const s = Math.floor(ms / 1000);
+    return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
+        .map(n => String(n).padStart(2, '0'))
+        .join(':');
+}
+
+function renderConsole(s) {
+    const sch = (s && (s.scheduler || s.status)) || {};
+    const running = !!sch.scheduler_running;
+
+    // 左侧节目表
+    const tbody = document.getElementById('ctl-tbody');
+    if (tbody) {
+        tbody.innerHTML = '';
+        if (!playlistCache.length) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td colspan="6" class="ctl-empty">暂无节目 — 点左上角「📁 导入素材」导入视频</td>';
+            tbody.appendChild(tr);
+        } else {
+            playlistCache.forEach((p, i) => {
+                const [label] = programState(p, sch);
+                const durMs = p.detected_duration_ms || p.declared_duration_ms || 0;
+                const onAir = sch.current_program_id === p.id && running;
+                const tr = document.createElement('tr');
+                if (onAir) tr.className = 'ctl-row-onair';
+                tr.innerHTML =
+                    `<td class="ctl-num">${String(i + 1).padStart(3, '0')}</td>` +
+                    `<td class="ctl-name" title="${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>` +
+                    `<td>${PROGRAM_KIND_LABEL[p.kind] || p.kind}</td>` +
+                    `<td class="ctl-mono">${msToHMS(durMs)}</td>` +
+                    `<td class="ctl-mono">${fmtBeijing(p.start_at_ms)}</td>` +
+                    `<td class="ctl-state">${label}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+    }
+
+    const total = playlistCache.reduce(
+        (a, p) => a + (p.detected_duration_ms || p.declared_duration_ms || 0), 0);
+
+    setText('ctl-playlist-count', `${playlistCache.length} 条`);
+    setText('sb-count', String(playlistCache.length));
+    setText('ctl-info-total', msToHMS(total));
+    setText('ctl-sb-total', msToHMS(total));
+    setText('sb-state', running ? (sch.scheduler_state === 'Interstitial' ? '插播中' : '播出中') : '待机');
+    setText('ctl-onair-text', running ? 'ON AIR' : '待机');
+    setText('ctl-info-current', sch.current_program_name || '—');
+    setText('sb-obs', sch.obs_connected ? '已连接' : '未连接');
+
+    const badge = document.getElementById('ctl-onair-badge');
+    if (badge) badge.classList.toggle('on', running);
+
+    // 工具条上的播出按钮：待机=绿色「启用」，播出中=红色「停用」
+    const armedBtn = document.getElementById('btn-armed');
+    if (armedBtn) {
+        armedBtn.classList.toggle('on', running);
+        armedBtn.textContent = running ? '停用自动播出' : '启用自动播出';
+    }
+    const dot = document.getElementById('dash-on-air-dot');
+    if (dot) {
+        dot.classList.toggle('bg-red-500', running);
+        dot.classList.toggle('bg-zinc-700', !running);
+        dot.classList.toggle('pulse', running);
+    }
+
+    const up = upcomingProgram();
+    setText('ctl-info-nextcd', up ? fmtCountdown(up.start_at_ms - Date.now()) : '--:--:--');
+}
+
+/// 每秒走一次：主时钟 + 备播倒计时 + 当前剩余时间本地递减（WS 会校正）。
+function tickClock() {
+    setText('ctl-clock', new Date().toLocaleTimeString('zh-CN', {
+        hour12: false, timeZone: 'Asia/Shanghai',
+    }));
+    const up = upcomingProgram();
+    setText('ctl-info-nextcd', up ? fmtCountdown(up.start_at_ms - Date.now()) : '--:--:--');
+    const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
+    if (sch.scheduler_running && typeof sch.current_remaining_ms === 'number'
+        && sch.current_remaining_ms > 0) {
+        sch.current_remaining_ms = Math.max(0, sch.current_remaining_ms - 1000);
+        setText('dash-remaining', formatRemaining(sch.current_remaining_ms));
+    }
+}
+
 function clearUpcoming() {
     document.getElementById('dash-next-name').textContent = '—';
     document.getElementById('dash-next-path').textContent = '—';
@@ -281,9 +384,36 @@ function setupDashboardActions() {
         b.disabled = false;
         b.textContent = '重新载入';
     });
-    document.getElementById('btn-clear-log').addEventListener('click', () => {
-        document.getElementById('dash-log').innerHTML = '';
-    });
+    const clearLog = document.getElementById('btn-clear-log');
+    if (clearLog) {
+        clearLog.addEventListener('click', () => {
+            const l = document.getElementById('dash-log');
+            if (l) l.innerHTML = '';
+        });
+    }
+    // 播控台工具条
+    const ctlImport = document.getElementById('ctl-import');
+    if (ctlImport) {
+        ctlImport.addEventListener('click', () => {
+            const f = document.getElementById('media-file-input');
+            if (f) f.click();
+        });
+    }
+    const ctlGoto = document.getElementById('ctl-goto-playlist');
+    if (ctlGoto) {
+        ctlGoto.addEventListener('click', () => {
+            document.querySelector('.nav-tab[data-tab="playlist"]')?.click();
+        });
+    }
+    const ctlReload = document.getElementById('ctl-reload');
+    if (ctlReload) ctlReload.addEventListener('click', () => refreshAll());
+    const ctlClearLog = document.getElementById('ctl-clear-log');
+    if (ctlClearLog) {
+        ctlClearLog.addEventListener('click', () => {
+            const l = document.getElementById('dash-log');
+            if (l) l.innerHTML = '';
+        });
+    }
     document.getElementById('btn-manage-bumpers').addEventListener('click', () => {
         document.querySelector('.nav-tab[data-tab="timeline"]')?.click();
     });
@@ -312,6 +442,15 @@ async function toggleArmed() {
             await apiPost(API.enable, { enabled: false });
             log('已停用自动播出');
         } else {
+            // Refuse to arm into a state that cannot possibly play, with the
+            // reason spelled out (missing/incorrect target source is by far the
+            // most common cause of "nothing happens").
+            const check = await checkTargetInput();
+            if (!check.ok) {
+                log(check.message);
+                setPlaylistStatus(check.message, 'err');
+                return;
+            }
             // Arming re-bases the list on *this* moment: later than planned ->
             // everything 顺延; earlier -> everything 提前. No manual fixups.
             await apiPost(API.start, {
@@ -435,7 +574,9 @@ function setupPlaylistAdd() {
         if (k === 'n' && !typing) {
             e.preventDefault();
             document.querySelector('.nav-tab[data-tab="playlist"]')?.click();
-            document.getElementById('playlist-add-name')?.focus();
+            // The manual name/path inputs are gone (import is pick-and-upload),
+            // so focus the import button instead.
+            document.getElementById('btn-pick-media')?.focus();
         } else if (k === 's') {
             e.preventDefault();
             saveCfg();
@@ -485,7 +626,11 @@ function setupPlaylistAdd() {
                 setPlaylistStatus(`正在导入 ${i + 1}/${probed.length}：${label}…`);
                 let path = '';
                 try {
-                    path = await uploadMediaFile(item.file);
+                    path = await uploadMediaFile(item.file, (p) => {
+                        setPlaylistStatus(
+                            `正在上传 ${i + 1}/${probed.length}：${label}（${Math.round(p * 100)}%）`
+                        );
+                    });
                 } catch (e) {
                     log(`上传「${label}」失败：${friendlyWriteError(e)}`);
                     continue;
@@ -708,23 +853,81 @@ async function addFromBrowser(f) {
 
 /// Hand the file bytes to the engine and get back the absolute path it was
 /// stored at. This is what lets "pick files" be the whole workflow.
-async function uploadMediaFile(file) {
-    const res = await writeWithAuth((headers) => fetch(API.upload, {
-        method: 'POST',
-        headers: {
-            ...headers,
-            'Content-Type': 'application/octet-stream',
-            // encodeURIComponent keeps non-ASCII names header-safe.
-            'X-File-Name': encodeURIComponent(file.name),
-        },
-        body: file,
-    }));
-    if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error || `HTTP ${res.status}`);
+/// Uses XHR (not fetch) so the admin can show real upload progress.
+async function uploadMediaFile(file, onProgress) {
+    // Make sure we send a fresh token: a WS frame may have replaced the
+    // snapshot since the page loaded.
+    await reloadToken();
+    const token = engineToken();
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', API.upload, true);
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        // encodeURIComponent keeps non-ASCII names header-safe.
+        xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+        xhr.setRequestHeader('X-Bootstrap-Token', token);
+        if (xhr.upload && onProgress) {
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) onProgress(e.loaded / e.total);
+            };
+        }
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    resolve(JSON.parse(xhr.responseText).path);
+                } catch (e) {
+                    reject(new Error('服务器返回无法解析'));
+                }
+                return;
+            }
+            let msg = `HTTP ${xhr.status}`;
+            try {
+                const j = JSON.parse(xhr.responseText);
+                if (j.error) msg = j.error;
+            } catch (_) { /* keep the status line */ }
+            if (xhr.status === 401 || xhr.status === 403) {
+                msg = '没有通过授权：请在 OBS 脚本面板点一次 Test Connection';
+            }
+            if (xhr.status === 413) {
+                msg = '文件太大，被引擎拒绝';
+            }
+            reject(new Error(msg));
+        };
+        xhr.onerror = () => reject(new Error('上传失败（引擎可能没在运行）'));
+        xhr.send(file);
+    });
+}
+
+/// Pre-flight check before arming: the target must exist in OBS and be a media
+/// source, otherwise nothing will ever play and the reason is invisible.
+async function checkTargetInput() {
+    const target = (lastSnapshot && lastSnapshot.target_input) || '';
+    if (!target) {
+        return { ok: false, message: '还没有设置目标媒体源：到「设置」页从下拉里选择你的媒体源并保存' };
     }
-    const j = await res.json();
-    return j.path;
+    try {
+        const j = await fetch('/api/obs/inputs').then(r => r.json());
+        const list = j.inputs || [];
+        if (!list.length) return { ok: true, message: '' }; // OBS 未连接，交给其它提示
+        const hit = list.find(i => i.inputName === target);
+        if (!hit) {
+            return {
+                ok: false,
+                message: `目标媒体源「${target}」在 OBS 里不存在。当前 OBS 的来源：` +
+                    list.map(i => i.inputName).join('、') + '。请到「设置」页重新选择',
+            };
+        }
+        const kind = (hit.inputKind || '').toLowerCase();
+        if (!/ffmpeg|vlc|media/.test(kind)) {
+            return {
+                ok: false,
+                message: `「${target}」不是媒体源（类型：${hit.inputKind}）。请选择「媒体源」，VLC 视频源也可`,
+            };
+        }
+        return { ok: true, message: '' };
+    } catch (_) {
+        return { ok: true, message: '' };
+    }
 }
 
 /// Read a media file's real duration in the browser (no upload, no ffprobe).
@@ -1121,7 +1324,11 @@ function startWs() {
     const url = `${proto}://${location.host}/ws`;
     try {
         ws = new WebSocket(url);
-        ws.addEventListener('open', () => log('WebSocket 已连接'));
+        ws.addEventListener('open', () => {
+            log('WebSocket 已连接');
+            const el = document.getElementById('ws-state');
+            if (el) { el.textContent = 'WS 已连接'; el.className = 'ws-state ok'; }
+        });
         ws.addEventListener('message', ev => {
             try {
                 const msg = JSON.parse(ev.data);
@@ -1132,6 +1339,7 @@ function startWs() {
                     lastSnapshot = { ...(lastSnapshot || {}), ...msg };
                     renderStatus(lastSnapshot);
                     renderDashboard(lastSnapshot);
+                    renderConsole(lastSnapshot);
                     // The engine only pushes status, not the playlist. If the
                     // item count changed (another client, or the scheduler
                     // probing durations), pull the list again.
@@ -1147,6 +1355,8 @@ function startWs() {
         });
         ws.addEventListener('close', () => {
             log('WebSocket 断开，1 秒后重连…');
+            const el = document.getElementById('ws-state');
+            if (el) { el.textContent = 'WS 断开'; el.className = 'ws-state bad'; }
             wsReconnectTimer = setTimeout(startWs, 1000);
         });
     } catch (e) {

@@ -266,7 +266,13 @@ impl ObsWsClient {
                         let data = match &cmd {
                             ObsWsCmd::SetInputSettings { input_name, settings, overlay, .. } => json!({
                                 "inputName": input_name,
-                                "settings": settings,
+                                // obs-websocket v5 requires `inputSettings` (a
+                                // plain `settings` key is rejected as a missing
+                                // required field) — the same class of bug as
+                                // `mediaAction` below. With the wrong key the
+                                // file was never applied to the source, so the
+                                // media source kept showing nothing.
+                                "inputSettings": settings,
                                 "overlay": overlay
                             }),
                             ObsWsCmd::TriggerMediaInputAction { input_name, action, .. } => json!({

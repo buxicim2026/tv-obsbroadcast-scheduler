@@ -111,6 +111,10 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         )
         .route("/api/scheduler/start", post(schedule_api::start_scheduler))
         .route("/ws", get(ws_push::ws_handler))
+        // axum caps buffered request bodies at 2 MiB by default, which silently
+        // rejected every media upload (a single video is far bigger). The
+        // upload handler enforces its own 4 GiB limit.
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(shared.clone());
 
     let root = Router::new()

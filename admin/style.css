@@ -569,3 +569,213 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
 .fs-row:hover { background: var(--surface-2); }
 .fs-dir { color: var(--blue); }
 .fs-file { color: var(--fg); }
+
+/* ================= 播出主控台（电视台播控台风格） ================= */
+.ctl-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    background: linear-gradient(180deg, #1b2130, #151a26);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+}
+.ctl-btn {
+    background: linear-gradient(180deg, #2a3244, #202634);
+    color: var(--fg);
+    border: 1px solid #3a4358;
+    border-radius: 5px;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 12px;
+    cursor: pointer;
+}
+.ctl-btn:hover { border-color: #5a6a8a; background: linear-gradient(180deg, #333d52, #262d3d); }
+.ctl-btn:active { transform: translateY(1px); }
+.ctl-btn-sm { padding: 3px 8px; font-size: 11px; }
+.ctl-armed {
+    background: linear-gradient(180deg, #1f7a3d, #17602f);
+    border-color: #2aa14f;
+    font-weight: 700;
+}
+.ctl-armed.on {
+    background: linear-gradient(180deg, #b32222, #8c1a1a);
+    border-color: #e04b4b;
+}
+.ctl-vsep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.ctl-spacer { flex: 1; }
+.ctl-clock {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: #7ee0a0;
+    letter-spacing: 1px;
+}
+
+.ctl-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 10px;
+    align-items: start;
+}
+@media (max-width: 1100px) { .ctl-main { grid-template-columns: 1fr; } }
+
+.ctl-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ctl-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #1a2030;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #cfe3ff;
+}
+.ctl-panel-sub { font-size: 11px; color: var(--muted); font-weight: 500; letter-spacing: 0; }
+
+.ctl-table-wrap { max-height: 46vh; overflow: auto; }
+.ctl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ctl-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #141a26;
+    color: #9fb4d8;
+    text-align: left;
+    font-weight: 600;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.ctl-table tbody td {
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    white-space: nowrap;
+}
+.ctl-table tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
+.ctl-num { font-family: var(--font-mono); color: #8fa6c8; }
+.ctl-name { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+.ctl-mono { font-family: var(--font-mono); }
+.ctl-state { color: var(--muted); }
+.ctl-row-onair { background: rgba(16, 185, 129, 0.14) !important; }
+.ctl-row-onair .ctl-state { color: #5eeaa0; font-weight: 700; }
+.ctl-empty { text-align: center; padding: 26px 10px; color: var(--muted); }
+
+.ctl-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ctl-monitor { background: #0b0f16; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ctl-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.ctl-badge.on { color: #ff6b6b; font-weight: 700; }
+.ctl-monitor-body { padding: 16px 14px; }
+.ctl-monitor-name {
+    font-size: 20px;
+    font-weight: 700;
+    color: #eaf2ff;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ctl-monitor-sub { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.ctl-monitor-time {
+    font-family: var(--font-mono);
+    font-size: 40px;
+    font-weight: 700;
+    color: #ff5252;
+    text-align: right;
+    letter-spacing: 2px;
+    line-height: 1;
+    text-shadow: 0 0 18px rgba(255, 82, 82, 0.35);
+}
+.ctl-info { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.ctl-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+}
+.ctl-info-row:last-child { border-bottom: 0; }
+.ctl-info-row span { color: var(--muted); }
+.ctl-info-row b {
+    color: #e8f0ff;
+    font-family: var(--font-mono);
+    max-width: 62%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ctl-bumpers-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 6px;
+    padding: 8px;
+    max-height: 140px;
+    overflow: auto;
+}
+.ctl-statusbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: #141a26;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+.ctl-statusbar b { color: #dbe7fb; font-family: var(--font-mono); }
+.ctl-log { margin-top: 10px; }
+.ctl-log-list {
+    list-style: none;
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 150px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+.ctl-log-list li { padding: 2px 0; }
+
+.ws-state { font-family: var(--font-mono); }
+.ws-state.ok { color: var(--green); }
+.ws-state.bad { color: var(--red); }
+
+/* 模态：文件浏览器等。必须保留 [hidden] 规则 —— 一旦这里设了 display，
+   浏览器对 hidden 属性的默认 display:none 就会被覆盖，弹窗会一直挂在页面上。 */
+.guide-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(0, 0, 0, 0.62);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+.guide-modal[hidden] { display: none; }
+.guide-box {
+    width: min(760px, 100%);
+    max-height: 84vh;
+    overflow: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.guide-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.guide-head h3 { margin: 0; font-size: 16px; }

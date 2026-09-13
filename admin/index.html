@@ -30,75 +30,106 @@
 <main class="px-6 py-6 max-w-screen-2xl mx-auto">
     <div id="global-error" hidden></div>
 
-    <!-- 屏 1 — Dashboard / 主控台 -->
+    <!-- 屏 1 — 播出主控台（电视台播控台布局） -->
     <section data-tab="dashboard" class="tab-panel">
-        <div class="grid grid-cols-12 gap-6">
 
-            <!-- ON AIR 大灯区 -->
-            <div class="col-span-12 lg:col-span-7 bg-surface border border-border rounded-2xl p-8 relative overflow-hidden">
-                <div class="absolute inset-0 pointer-events-none opacity-30" id="on-air-glow"></div>
-                <div class="flex items-start justify-between relative">
-                    <div>
-                        <div class="flex items-center gap-3 mb-3">
-                            <span class="status-dot bg-red-500 shadow-red-glow" id="dash-on-air-dot"></span>
-                            <span class="text-red-400 font-bold tracking-widest text-sm">ON AIR</span>
-                        </div>
-                        <div class="text-3xl font-bold mb-1" id="dash-program-name">— 待机 —</div>
-                        <div class="text-muted text-sm" id="dash-program-meta">等待节目表启动</div>
-                    </div>
-                    <div class="text-right">
-                        <div class="font-mono text-5xl tabular-nums text-emerald-400 leading-none" id="dash-remaining">--:--.--</div>
-                        <div class="text-xs text-muted mt-2">剩余时间（毫秒精度）</div>
-                    </div>
+        <!-- 顶部工具条 -->
+        <div class="ctl-bar">
+            <button class="ctl-btn" id="ctl-import">📁 导入素材</button>
+            <button class="ctl-btn" id="ctl-goto-playlist">编排节目单</button>
+            <button class="ctl-btn" id="ctl-reload">重新载入</button>
+            <button class="ctl-btn" id="ctl-clear-log">清空日志</button>
+            <span class="ctl-vsep"></span>
+            <button class="ctl-btn ctl-armed" id="btn-armed">启用自动播出</button>
+            <button class="ctl-btn" id="btn-pause">暂停</button>
+            <button class="ctl-btn" id="btn-next">下一档</button>
+            <span class="ctl-spacer"></span>
+            <span class="ctl-clock" id="ctl-clock">--:--:--</span>
+        </div>
+
+        <div class="ctl-main">
+            <!-- 左：节目表 -->
+            <div class="ctl-panel ctl-playlist">
+                <div class="ctl-panel-head">
+                    <span>节目表</span>
+                    <span class="ctl-panel-sub" id="ctl-playlist-count">0 条</span>
                 </div>
-                <div class="mt-6 flex flex-wrap gap-2">
-                    <button class="btn btn-primary" id="btn-armed">启用自动播出</button>
-                    <button class="btn btn-secondary" id="btn-pause">暂停</button>
-                    <button class="btn btn-secondary" id="btn-next">跳到下一档</button>
-                    <button class="btn btn-secondary" id="btn-restart">重新载入</button>
+                <div class="ctl-table-wrap">
+                    <table class="ctl-table">
+                        <thead>
+                            <tr>
+                                <th style="width:46px">序号</th>
+                                <th>节目名</th>
+                                <th style="width:104px">节目类型</th>
+                                <th style="width:88px">时长</th>
+                                <th style="width:158px">播出时间</th>
+                                <th style="width:86px">播出状态</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ctl-tbody"></tbody>
+                    </table>
                 </div>
             </div>
 
-            <!-- 下一档预告 -->
-            <div class="col-span-12 lg:col-span-5 bg-surface border border-border rounded-2xl p-6">
-                <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-sm font-semibold text-muted tracking-widest">下一档</h3>
-                    <span class="pill pill-muted" id="dash-next-kind">Primary</span>
-                </div>
-                <div class="text-xl font-bold mb-2" id="dash-next-name">—</div>
-                <div class="font-mono text-xs text-muted truncate" id="dash-next-path">—</div>
-                <div class="mt-4 grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                        <div class="text-muted text-xs">起始时间</div>
-                        <div class="font-mono" id="dash-next-start">--:--:--</div>
+            <!-- 右：输出监视 + 播控信息 + 插播 -->
+            <div class="ctl-side">
+                <div class="ctl-monitor">
+                    <div class="ctl-panel-head">
+                        <span>输出监视</span>
+                        <span class="ctl-badge" id="ctl-onair-badge">
+                            <span class="status-dot bg-zinc-700" id="dash-on-air-dot"></span>
+                            <span id="ctl-onair-text">待机</span>
+                        </span>
                     </div>
-                    <div>
-                        <div class="text-muted text-xs">已探测时长</div>
-                        <div class="font-mono" id="dash-next-duration">--:--</div>
+                    <div class="ctl-monitor-body">
+                        <div class="ctl-monitor-name" id="dash-program-name">— 待机 —</div>
+                        <div class="ctl-monitor-sub" id="dash-program-meta">等待节目表启动</div>
+                        <div class="ctl-monitor-time" id="dash-remaining">--:--.--</div>
                     </div>
                 </div>
-            </div>
 
-            <!-- 插播快键 -->
-            <div class="col-span-12 lg:col-span-7 bg-surface border border-border rounded-2xl p-6">
-                <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-sm font-semibold text-muted tracking-widest">插播快键</h3>
-                    <button class="btn btn-link" id="btn-manage-bumpers">管理插播 →</button>
+                <div class="ctl-info">
+                    <div class="ctl-info-row"><span>当前播出</span><b id="ctl-info-current">—</b></div>
+                    <div class="ctl-info-row"><span>备播节目</span><b id="dash-next-name">—</b></div>
+                    <div class="ctl-info-row"><span>备播时间</span><b id="dash-next-start">--:--:--</b></div>
+                    <div class="ctl-info-row"><span>备播倒计时</span><b id="ctl-info-nextcd">--:--:--</b></div>
+                    <div class="ctl-info-row"><span>节目表总长</span><b id="ctl-info-total">--:--:--</b></div>
                 </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" id="dash-bumpers-list">
-                    <div class="text-muted text-sm col-span-full">暂无插播条目，先在 <button class="btn btn-link" data-jump-tab="timeline">时间轴</button> 或 <button class="btn btn-link" data-jump-tab="playlist">节目表</button> 添加。</div>
+
+                <div class="ctl-panel ctl-bumpers">
+                    <div class="ctl-panel-head">
+                        <span>插播快键</span>
+                        <button class="ctl-btn ctl-btn-sm" id="btn-manage-bumpers">管理 →</button>
+                    </div>
+                    <div class="ctl-bumpers-list" id="dash-bumpers-list">
+                        <div class="text-muted text-xs">暂无插播条目</div>
+                    </div>
                 </div>
             </div>
+        </div>
 
-            <!-- 系统日志 -->
-            <div class="col-span-12 lg:col-span-5 bg-surface border border-border rounded-2xl p-6">
-                <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-sm font-semibold text-muted tracking-widest">活动日志</h3>
-                    <button class="btn btn-link" id="btn-clear-log">清空</button>
-                </div>
-                <ol class="font-mono text-xs space-y-1 max-h-72 overflow-y-auto" id="dash-log"></ol>
+        <!-- 底部状态栏 -->
+        <div class="ctl-statusbar">
+            <span>节目表：<b>播出表</b></span>
+            <span>节目数：<b id="sb-count">0</b></span>
+            <span>播出总长度：<b id="ctl-sb-total">--:--:--</b></span>
+            <span>播控状态：<b id="sb-state">待机</b></span>
+            <span>主备连接：<b id="sb-obs">—</b></span>
+            <span class="ctl-spacer"></span>
+            <span id="ws-state" class="ws-state">WS …</span>
+        </div>
+
+        <!-- 活动日志 -->
+        <div class="ctl-panel ctl-log">
+            <div class="ctl-panel-head">
+                <span>活动日志</span>
+                <span class="ctl-panel-sub" id="dash-next-kind">—</span>
             </div>
-
+            <ol class="ctl-log-list" id="dash-log"></ol>
+            <span class="hidden" id="dash-next-path">—</span>
+            <span class="hidden" id="dash-next-duration">—</span>
+            <span class="hidden" id="on-air-glow"></span>
+            <button class="hidden" id="btn-restart" type="button"></button>
         </div>
     </section>
 
