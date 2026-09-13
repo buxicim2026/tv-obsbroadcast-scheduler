@@ -575,7 +575,7 @@ impl Scheduler {
                         Some(next) if next.start_at_ms > now_ms => {
                             // A real gap in the schedule: hold, and cut on time
                             // rather than airing this row early.
-                            let fire_at = next.start_at_ms.saturating_sub(lead_in);
+                            let fire_at = next.start_at_ms.saturating_sub(lead_in as i64);
                             self.transition_to_armed(state, next, fire_at, machine);
                         }
                         Some(next) => match self.cut_to(cfg, next).await {
@@ -596,7 +596,8 @@ impl Scheduler {
                                 );
                                 match program_after(cfg, &next.id) {
                                     Some(n2) => {
-                                        let fire_at = n2.start_at_ms.saturating_sub(lead_in);
+                                        let fire_at =
+                                            n2.start_at_ms.saturating_sub(lead_in as i64);
                                         self.transition_to_armed(state, n2, fire_at, machine);
                                     }
                                     None => self.become_idle(state, machine),
