@@ -6,15 +6,15 @@ tv_obsbroadcast_scheduler.lua — OBS Studio script frontend.
 运行库等一类问题，因此不会出现"编译通过但 OBS 加载不了"的情况。
 
 职责：
-  * 注册一个控制用 source（可在『添加来源』里看到）
-  * 提供属性面板填写 obs-websocket 凭据 / 目标媒体源 / 调度开关
+  * 提供脚本属性面板填写 obs-websocket 凭据 / 目标媒体源 / 调度开关
   * 拉起并监控 Rust 引擎子进程，把配置通过 HTTP 推给引擎
 真正的调度逻辑仍在 Rust 引擎里（通过 obs-websocket 改媒体源）。
 
 安装：
   1. 本文件旁放好 engine/ 目录（内含 Rust 引擎二进制）
   2. OBS 菜单：工具 -> 脚本 -> "+" -> 选择本文件
-  3. 场景里：添加来源 -> Broadcast Scheduler Control
+  3. 在脚本属性里点「Open Admin in Browser」，用网页面板操作。
+     不需要往场景里添加任何来源 —— 视频由你指定的媒体源播放。
 --]]
 
 local obs = obslua
@@ -264,66 +264,17 @@ function on_open_admin_clicked(props, property)
   return true
 end
 
------------------------------------------------------------- source 类型 ---
-
-local source_info = {
-  id = "tvbs_scheduler_control",
-  type = obs.OBS_SOURCE_TYPE_INPUT,
-  output_flags = obs.OBS_SOURCE_VIDEO,
-}
-
-source_info.get_name = function()
-  return "Broadcast Scheduler Control"
-end
-
-source_info.create = function(settings, source)
-  return {}
-end
-
-source_info.destroy = function(data)
-end
-
-source_info.get_width = function(data)
-  return 1
-end
-
-source_info.get_height = function(data)
-  return 1
-end
-
--- 该源不产出画面，视频由用户指定的 Media Source 播放。
-source_info.video_render = function(data, effect)
-end
-
-source_info.get_defaults = function(settings)
-  obs.obs_data_set_default_string(settings, "ws_host", "127.0.0.1")
-  obs.obs_data_set_default_int(settings, "ws_port", DEFAULT_WS_PORT)
-  obs.obs_data_set_default_string(settings, "ws_password", "")
-  obs.obs_data_set_default_bool(settings, "ws_tls", false)
-  obs.obs_data_set_default_string(settings, "target_input", "main_media")
-  obs.obs_data_set_default_bool(settings, "scheduler_enabled", false)
-  obs.obs_data_set_default_string(settings, "bootstrap_token", "")
-end
-
-source_info.get_properties = function(data)
-  local props = obs.obs_properties_create()
-  obs.obs_properties_add_text(props, "tvbs_hint",
-    "控制源：不输出画面。视频由下面填写的 Media Source 播放。",
-    obs.OBS_TEXT_INFO)
-  return add_fields(props)
-end
-
-source_info.update = function(data, settings)
-  if script_settings == nil then script_settings = settings end
-  push_settings(settings)
-end
-
 -------------------------------------------------------- 脚本生命周期 ---
+
+-- 以前这里还注册过一个隐藏的 input source（"Broadcast Scheduler Control"），
+-- 用户必须把它加进场景，否则脚本不生效。现在调度完全由 Rust 引擎通过
+-- obs-websocket 驱动用户指定的媒体源，不再需要任何占位源 —— 注册一个不产出
+-- 画面的 source 只会污染『添加来源』列表、让用户找不到该选什么。
 
 function script_description()
   return "TV Broadcast Scheduler —— 让一个媒体源按节目表毫秒级自动硬切。\n\n"
-    .. "填写 obs-websocket 凭据与目标媒体源后，在场景里『添加来源 → "
-    .. "Broadcast Scheduler Control』即可。"
+    .. "填写 obs-websocket 凭据与目标媒体源即可，不需要往场景里添加来源。\n"
+    .. "面板：Admin UI http://" .. ENGINE_HOST .. ":" .. ENGINE_PORT .. "/admin"
 end
 
 function script_properties()
@@ -346,7 +297,6 @@ end
 
 function script_load(settings)
   script_settings = settings
-  obs.obs_register_source(source_info)
   ensure_engine()
   -- Push on load as well: otherwise the engine only ever sees the credentials
   -- (and the bootstrap token the admin needs for writes) when the user happens

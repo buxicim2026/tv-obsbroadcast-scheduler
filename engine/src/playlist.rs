@@ -36,9 +36,53 @@ pub fn next_within<'a>(cfg: &'a Config, now_ms: i64) -> Option<&'a ProgramEntry>
     next_program(cfg, now_ms)
 }
 
+/// The duration we actually schedule against: whatever OBS reported once the
+/// file really played, falling back to the operator's declared estimate.
+///
+/// Keying everything to `declared_duration_ms` is what made programmes lose
+/// their last second — the declared value is an estimate, so we cut away while
+/// the real file still had time left on it.
+pub fn effective_duration_ms(p: &ProgramEntry) -> u64 {
+    match p.detected_duration_ms {
+        Some(d) if d > 0 => d,
+        _ => p.declared_duration_ms,
+    }
+}
+
+/// Absolute wall-clock end of `p`, from its effective duration.
+pub fn end_at_ms(p: &ProgramEntry) -> i64 {
+    p.start_at_ms
+        .saturating_add(effective_duration_ms(p) as i64)
+}
+
 pub fn in_window(p: &ProgramEntry, now_ms: i64) -> bool {
-    let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
-    now_ms >= p.start_at_ms && now_ms < end
+    now_ms >= p.start_at_ms && now_ms < end_at_ms(p)
+}
+
+/// Push every entry from `from_index` onward by `delta_ms` (negative moves them
+/// earlier).
+///
+/// This is what keeps a manual pause from leaving dead air: everything still to
+/// come slides by exactly the time the operator held the transport, instead of
+/// keeping its original slot and being cut off when we catch up to it.
+pub fn shift_from(items: &mut [ProgramEntry], from_index: usize, delta_ms: i64) {
+    for p in items.iter_mut().skip(from_index) {
+        p.start_at_ms = p.start_at_ms.saturating_add(delta_ms);
+    }
+}
+
+/// Lay entries out back-to-back from `from_index` onward, the first one landing
+/// on `base_ms`.
+///
+/// Used after a manual skip: the rest of the day closes up behind the cut so the
+/// discarded programme doesn't leave a hole in the schedule (which would show as
+/// black until the next advertised start time).
+pub fn resequence_from(items: &mut [ProgramEntry], from_index: usize, base_ms: i64) {
+    let mut cursor = base_ms;
+    for p in items.iter_mut().skip(from_index) {
+        p.start_at_ms = cursor;
+        cursor = cursor.saturating_add(effective_duration_ms(p).max(1) as i64);
+    }
 }
 
 /// Returns the bumper that should fire inside `p` at or before `now_ms`,
@@ -172,5 +216,41 @@ mod tests {
         assert_eq!(fmt_ms(0), "00:00:00.000");
         assert_eq!(fmt_ms(3_661_001), "01:01:01.001");
         assert_eq!(fmt_ms(-500), "-00:00:00.500");
+    }
+
+    #[test]
+    fn detected_duration_wins_over_declared() {
+        // A video that is really 62s long but was declared as 60s must not be
+        // cut away two seconds early.
+        let mut p = program(0, 60_000);
+        assert_eq!(effective_duration_ms(&p), 60_000);
+        p.detected_duration_ms = Some(62_000);
+        assert_eq!(effective_duration_ms(&p), 62_000);
+        assert_eq!(end_at_ms(&p), 62_000);
+        // A failed probe must clear back to the declared value, not to 0.
+        p.detected_duration_ms = Some(0);
+        assert_eq!(effective_duration_ms(&p), 60_000);
+    }
+
+    #[test]
+    fn shift_from_moves_only_the_tail() {
+        let mut cfg = Config::default();
+        cfg.playlist.items.push(program(0, 1_000));
+        cfg.playlist.items.push(program(1_000, 1_000));
+        cfg.playlist.items.push(program(2_000, 1_000));
+        shift_from(&mut cfg.playlist.items, 1, 5_000);
+        let starts: Vec<i64> = cfg.playlist.items.iter().map(|p| p.start_at_ms).collect();
+        assert_eq!(starts, vec![0, 6_000, 7_000]);
+    }
+
+    #[test]
+    fn resequence_from_closes_the_gap() {
+        let mut cfg = Config::default();
+        cfg.playlist.items.push(program(0, 1_000));
+        cfg.playlist.items.push(program(9_000, 2_000));
+        cfg.playlist.items.push(program(20_000, 3_000));
+        resequence_from(&mut cfg.playlist.items, 1, 5_000);
+        let starts: Vec<i64> = cfg.playlist.items.iter().map(|p| p.start_at_ms).collect();
+        assert_eq!(starts, vec![0, 5_000, 7_000]);
     }
 }

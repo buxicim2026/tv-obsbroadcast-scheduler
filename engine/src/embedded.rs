@@ -9,6 +9,9 @@ pub static ADMIN_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../admin");
 /// `overlay/` (broadcast status overlay) — served by axum at `/overlay`.
 pub static OVERLAY_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../overlay");
 
+/// `clock/` (station clock source) — served by axum at `/clock`.
+pub static CLOCK_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../clock");
+
 /// Aggregate asset map so `server::build_router` doesn't have to enumerate.
 /// Empty at this stage (init-scaffold); admin/overlay are filled by the
 /// admin-web todo. Until then `/admin` and `/overlay` return 404 with a

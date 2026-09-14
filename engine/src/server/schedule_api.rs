@@ -86,6 +86,7 @@ fn snapshot_value(cfg: &crate::config::Config, st: &AppStatus) -> Value {
         "obs_ws": cfg.obs_ws,
         "target_input": cfg.target_input,
         "bootstrap_token": cfg.bootstrap_token,
+        "clock": cfg.clock,
         "playlist_size": cfg.playlist.items.len(),
         "bumpers_size": cfg.playlist.bumpers.len(),
     })
@@ -173,6 +174,11 @@ pub struct ReorderPayload {
     /// the planned 开播时间.
     #[serde(default)]
     pub from_now: bool,
+    /// Only re-lay the list from this row onward; everything before it keeps
+    /// its existing start time. Drag-and-drop needs this: re-timing rows that
+    /// already aired would rewrite the as-run log and confuse the scheduler.
+    #[serde(default)]
+    pub from_id: Option<String>,
 }
 
 /// Re-sequence the playlist: reorder rows and lay them back-to-back so there
@@ -194,28 +200,36 @@ pub async fn reorder(
         let max_rank = rank.len();
         cfg.playlist.items.sort_by_key(|p| rank.get(&p.id).copied().unwrap_or(max_rank));
 
+        // Anything before `from_id` already aired (or is on air) and keeps its
+        // slot; only the pending tail gets re-laid so no gap is left behind.
+        let start_idx = payload
+            .from_id
+            .as_deref()
+            .and_then(|id| cfg.playlist.items.iter().position(|p| p.id == id))
+            .unwrap_or(0);
+
         let first_start = cfg
             .playlist
             .items
-            .first()
+            .get(start_idx)
             .map(|p| p.start_at_ms)
+            .or_else(|| cfg.playlist.items.first().map(|p| p.start_at_ms))
             .unwrap_or_else(chrono_now_ms);
 
         // Lay out back-to-back from the chosen base.
-        let mut cursor = if payload.from_now {
+        let base = if payload.from_now {
             chrono_now_ms() + 1_000
         } else {
             payload.base_start_ms.unwrap_or(first_start)
         };
-        for p in cfg.playlist.items.iter_mut() {
-            p.start_at_ms = cursor;
-            let dur = p
-                .detected_duration_ms
-                .filter(|d| *d > 0)
-                .unwrap_or(p.declared_duration_ms);
-            cursor = cursor.saturating_add(dur.max(1) as i64);
-        }
-        (cfg.playlist.items.len(), cursor)
+        crate::playlist::resequence_from(&mut cfg.playlist.items, start_idx, base);
+        let ends_at = cfg
+            .playlist
+            .items
+            .last()
+            .map(|p| crate::playlist::end_at_ms(p))
+            .unwrap_or(base);
+        (cfg.playlist.items.len(), ends_at)
     };
     let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     persist(state.config.clone()).await?;

@@ -748,6 +748,29 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
 .ws-state.ok { color: var(--green); }
 .ws-state.bad { color: var(--red); }
 
+.grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* 节目清单：名称可能很长，在单元格里截断显示，完整名称靠 title 悬停查看 */
+.pl-name {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 节目清单：鼠标拖拽排序 */
+.pl-grip {
+    cursor: grab;
+    user-select: none;
+    color: var(--muted);
+    padding-right: 6px;
+}
+.pl-grip:active { cursor: grabbing; }
+tr.row-locked .pl-grip { cursor: not-allowed; opacity: .35; }
+tr.dragging { opacity: .45; }
+tr.drop-above { box-shadow: inset 0 3px 0 var(--red); }
+tr.drop-below { box-shadow: inset 0 -3px 0 var(--red); }
+
 /* 模态：文件浏览器等。必须保留 [hidden] 规则 —— 一旦这里设了 display，
    浏览器对 hidden 属性的默认 display:none 就会被覆盖，弹窗会一直挂在页面上。 */
 .guide-modal {

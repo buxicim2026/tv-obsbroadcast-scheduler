@@ -95,6 +95,10 @@ fn snapshot(state: &AppState) -> serde_json::Value {
         "playlist_size": cfg.playlist.items.len(),
         "bumpers_size": cfg.playlist.bumpers.len(),
         "target_input": cfg.target_input,
+        // Kept in sync with GET /api/status: the station clock (/clock) reads
+        // its font/size/opacity from the snapshot, so dropping it here would
+        // leave the overlay rendering the defaults forever.
+        "clock": cfg.clock,
         // The admin panel replaces its whole snapshot with this frame on every
         // push. Without the token here the UI lost it ~2x a second and every
         // write came back 401 ("not authorised") even though the token existed.

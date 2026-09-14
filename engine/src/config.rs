@@ -22,6 +22,36 @@ pub struct Config {
     /// /api/bootstrap endpoint (which carries the WS password in plaintext).
     #[serde(default)]
     pub bootstrap_token: Option<String>,
+    /// Station clock overlay (整点 / 半点报时).
+    #[serde(default)]
+    pub clock: ClockConfig,
+}
+
+/// A TV-station style clock that pops up on the hour and half-hour, like the
+/// 报时器 every terrestrial channel runs before the news. Rendered by a small
+/// browser source (`/clock`) so it stays crisp at any canvas size and costs the
+/// broadcaster one source, not a plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClockConfig {
+    /// Master switch — off means the overlay never draws anything.
+    #[serde(default)]
+    pub enabled: bool,
+    /// CSS font-family stack for the digits.
+    #[serde(default = "default_clock_font_family")]
+    pub font_family: String,
+    /// Height of the big `HH:MM:SS` line, in px.
+    #[serde(default = "default_clock_font_size_px")]
+    pub font_size_px: u32,
+    /// Background plate opacity, 0–100. 0 draws no plate at all.
+    #[serde(default = "default_clock_bg_opacity")]
+    pub bg_opacity_percent: u8,
+    /// How long it stays on screen, in seconds (60 = the classic one minute).
+    #[serde(default = "default_clock_duration_s")]
+    pub duration_s: u32,
+    /// Corner it sits in: top_left / top_right / bottom_left / bottom_right /
+    /// top_center / bottom_center.
+    #[serde(default = "default_clock_position")]
+    pub position: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +171,22 @@ fn default_target_input() -> String {
 fn default_lead_in_ms() -> u64 {
     200
 }
+fn default_clock_font_family() -> String {
+    "'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif"
+        .to_string()
+}
+fn default_clock_font_size_px() -> u32 {
+    72
+}
+fn default_clock_bg_opacity() -> u8 {
+    45
+}
+fn default_clock_duration_s() -> u32 {
+    60
+}
+fn default_clock_position() -> String {
+    "top_right".to_string()
+}
 
 impl Default for MissingFilePolicy {
     fn default() -> Self {
@@ -169,6 +215,19 @@ impl Default for SchedulerConfig {
             clock_offset_ms: 0,
             enabled: false,
             on_missing_file: MissingFilePolicy::default(),
+        }
+    }
+}
+
+impl Default for ClockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            font_family: default_clock_font_family(),
+            font_size_px: default_clock_font_size_px(),
+            bg_opacity_percent: default_clock_bg_opacity(),
+            duration_s: default_clock_duration_s(),
+            position: default_clock_position(),
         }
     }
 }

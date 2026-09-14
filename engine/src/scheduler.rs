@@ -78,6 +78,10 @@ pub enum SchedulerState {
     Paused {
         program_id: String,
         remaining_ms: i64,
+        /// Wall clock when the pause started, so resuming can slide everything
+        /// still to come forward by exactly as long as we were held.
+        #[serde(default)]
+        paused_at_ms: i64,
     },
     /// A bumper is on air in the middle of `primary_id`. When it ends we cut
     /// back to the primary at `return_to_ms` (its offset inside the primary).
@@ -269,7 +273,7 @@ impl Scheduler {
                         .items
                         .iter()
                         .find(|p| p.id == pid)
-                        .map(|p| p.declared_duration_ms as i64)
+                        .map(|p| crate::playlist::effective_duration_ms(p) as i64)
                         .unwrap_or(0),
                 }
                 .max(0);
@@ -287,17 +291,19 @@ impl Scheduler {
                     SchedulerState::Paused {
                         program_id: pid.clone(),
                         remaining_ms: remaining,
+                        paused_at_ms: now_ms,
                     },
                 );
                 state.status.write().paused = true;
                 info!("transport: paused ({remaining}ms left of {pid})");
             }
             ControlCommand::Resume => {
-                let (pid, remaining) = match machine {
+                let (pid, remaining, paused_at) = match machine {
                     SchedulerState::Paused {
                         program_id,
                         remaining_ms,
-                    } => (program_id.clone(), *remaining_ms),
+                        paused_at_ms,
+                    } => (program_id.clone(), *remaining_ms, *paused_at_ms),
                     _ => {
                         debug!("resume ignored: transport is not paused");
                         return;
@@ -319,6 +325,14 @@ impl Scheduler {
                     .map(|p| p.name.clone())
                     .unwrap_or_default();
                 let end_at = now_ms.saturating_add(remaining);
+                // Slide everything still to come forward by exactly how long we
+                // were held. Without it the later programmes keep their original
+                // slots, so they are already "due" the instant we resume and get
+                // cut off — leaving black until the next one catches up.
+                let held_ms = now_ms.saturating_sub(paused_at);
+                if held_ms > 0 {
+                    self.shift_after(state, &pid, held_ms);
+                }
                 self.transition_to_playing(state, &pid, &name, remaining, now_ms, end_at, machine);
                 state.status.write().paused = false;
                 info!("transport: resumed '{name}' with {remaining}ms left");
@@ -337,8 +351,13 @@ impl Scheduler {
                 };
                 match self.cut_to(cfg, next).await {
                     Ok(false) => {
-                        let dur = next.declared_duration_ms as i64;
+                        let dur = crate::playlist::effective_duration_ms(next) as i64;
                         let end_at = now_ms.saturating_add(dur);
+                        // Close up the rest of the day behind the cut: otherwise
+                        // the discarded programme leaves a hole right where it
+                        // used to be and the source sits there black until the
+                        // next advertised start time.
+                        self.resequence_after(state, &next.id, end_at);
                         self.transition_to_playing(
                             state,
                             &next.id,
@@ -506,7 +525,7 @@ impl Scheduler {
                 // First time this program airs: once OBS has the file open,
                 // read the real duration back so the UI can show it.
                 if p.detected_duration_ms.is_none() && into_program_ms > 1500 {
-                    self.probe_duration(state, p).await;
+                    self.probe_duration(state, p, machine).await;
                 }
 
                 // Watchdog: verify OBS is really playing what the timeline
@@ -580,7 +599,7 @@ impl Scheduler {
                         }
                         Some(next) => match self.cut_to(cfg, next).await {
                             Ok(false) => {
-                                let dur = next.declared_duration_ms as i64;
+                                let dur = crate::playlist::effective_duration_ms(next) as i64;
                                 let end_at = now_ms.saturating_add(dur);
                                 self.transition_to_playing(
                                     state, &next.id, &next.name, dur, now_ms, end_at, machine,
@@ -800,7 +819,7 @@ impl Scheduler {
         machine: &mut SchedulerState,
     ) {
         debug!("begin_playing {} now={}", p.name, now_ms);
-        let end = p.start_at_ms.saturating_add(p.declared_duration_ms as i64);
+        let end = crate::playlist::end_at_ms(p);
         self.transition_to_playing(
             state,
             &p.id,
@@ -853,11 +872,11 @@ impl Scheduler {
         }
 
         if st.contains("ENDED") {
-            let declared = p.declared_duration_ms as i64;
-            if into_ms < declared.saturating_sub(1_500) {
+            let slot_ms = crate::playlist::effective_duration_ms(p) as i64;
+            if into_ms < slot_ms.saturating_sub(1_500) {
                 warn!(
                     "'{}' ended after {}ms but is scheduled for {}ms; cutting on early",
-                    p.name, into_ms, declared
+                    p.name, into_ms, slot_ms
                 );
                 if let SchedulerState::Playing { end_at_ms, .. } = machine {
                     *end_at_ms = crate::playlist::effective_now_ms(&cfg.scheduler);
@@ -900,7 +919,12 @@ impl Scheduler {
     /// Ask OBS how long the file really is and store it on the playlist entry.
     /// `media_probe` existed but was never called, so `detected_duration_ms`
     /// stayed empty forever.
-    async fn probe_duration(&self, state: &crate::AppState, p: &ProgramEntry) {
+    async fn probe_duration(
+        &self,
+        state: &crate::AppState,
+        p: &ProgramEntry,
+        machine: &mut SchedulerState,
+    ) {
         let now = Utc::now().timestamp_millis();
         if now - LAST_PROBE_MS.load(Ordering::Relaxed) < 5_000 {
             return;
@@ -915,13 +939,71 @@ impl Scheduler {
         else {
             return;
         };
-        let mut cfg = state.config.write();
-        if let Some(entry) = cfg.playlist.items.iter_mut().find(|e| e.id == p.id) {
-            entry.detected_duration_ms = Some(dur);
-            info!("probed duration for {}: {}ms", entry.name, dur);
+        let new_end = {
+            let mut cfg = state.config.write();
+            let end = if let Some(entry) = cfg.playlist.items.iter_mut().find(|e| e.id == p.id) {
+                entry.detected_duration_ms = Some(dur);
+                info!("probed duration for {}: {}ms", entry.name, dur);
+                Some(crate::playlist::end_at_ms(entry))
+            } else {
+                None
+            };
+            drop(cfg);
+            end
+        };
+        // Move the on-air programme's end onto the real duration, so the cut
+        // lands on its last frame instead of on the declared estimate.
+        if let SchedulerState::Playing {
+            program_id,
+            end_at_ms,
+            ..
+        } = machine
+        {
+            if program_id == &p.id {
+                if let Some(end) = new_end {
+                    *end_at_ms = end;
+                }
+            }
         }
-        drop(cfg);
         let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    }
+
+    /// Re-lay every programme after `after_id` back-to-back from `base_ms`,
+    /// persist, and tell the UI to refresh.
+    fn resequence_after(&self, state: &crate::AppState, after_id: &str, base_ms: i64) {
+        let mut cfg = state.config.write();
+        let Some(idx) = cfg.playlist.items.iter().position(|p| p.id == after_id) else {
+            return;
+        };
+        crate::playlist::resequence_from(&mut cfg.playlist.items, idx + 1, base_ms);
+        drop(cfg);
+        self.persist(state);
+        let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    }
+
+    /// Slide everything after `after_id` by `delta_ms` (the pause), then persist.
+    fn shift_after(&self, state: &crate::AppState, after_id: &str, delta_ms: i64) {
+        let mut cfg = state.config.write();
+        let Some(idx) = cfg.playlist.items.iter().position(|p| p.id == after_id) else {
+            return;
+        };
+        crate::playlist::shift_from(&mut cfg.playlist.items, idx + 1, delta_ms);
+        drop(cfg);
+        self.persist(state);
+        let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    }
+
+    /// Best-effort write-back so schedule edits made here survive a restart.
+    fn persist(&self, state: &crate::AppState) {
+        let cfg = state.config.read().clone();
+        let path = crate::config_path();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || cfg.save_atomic(&path)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("persist config failed: {e:#}"),
+                Err(e) => warn!("persist task join failed: {e}"),
+            }
+        });
     }
 
     /// 1.5 s after a cut, verify with OBS that the media is actually playing.
@@ -1052,6 +1134,15 @@ impl Scheduler {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
+        // Stop the source *before* swapping the file. Changing `local_file`
+        // while it is still playing makes OBS reopen the asset and carry on
+        // playing it immediately, so by the time RESTART arrived the new
+        // programme had already run through the settle delay — every switch
+        // replayed its opening second. Stopping first makes RESTART the single
+        // start-of-playback event.
+        let _ = client
+            .trigger_media_input_action(&self.target_input, MediaInputAction::Stop)
+            .await;
         // Always re-point the source at the file, even if the preload tick was
         // missed (engine restart, lead-in shorter than the RPC round-trip):
         // RESTART on its own would just replay whatever was configured before.

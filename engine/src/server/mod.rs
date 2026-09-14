@@ -22,7 +22,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::embedded::{DistAssets, ADMIN_DIR, OVERLAY_DIR};
+use crate::embedded::{DistAssets, ADMIN_DIR, CLOCK_DIR, OVERLAY_DIR};
 use crate::AppState;
 
 /// Content-Type by file extension — the embedded admin/overlay assets are
@@ -85,6 +85,14 @@ async fn overlay_asset(Path(path): Path<String>) -> AxumResponse {
     serve_embedded(&OVERLAY_DIR, &path)
 }
 
+async fn clock_index() -> AxumResponse {
+    serve_embedded(&CLOCK_DIR, "index.html")
+}
+
+async fn clock_asset(Path(path): Path<String>) -> AxumResponse {
+    serve_embedded(&CLOCK_DIR, &path)
+}
+
 pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
     // Both routers must carry the *same* state type to be merged, and /ws
     // needs `State<Arc<AppState>>` — so share one Arc across both.
@@ -129,6 +137,8 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         .route("/admin/*path", get(admin_asset))
         .route("/overlay", get(overlay_index))
         .route("/overlay/*path", get(overlay_asset))
+        .route("/clock", get(clock_index))
+        .route("/clock/*path", get(clock_asset))
         .with_state(shared)
         .merge(api)
         .layer(
@@ -162,7 +172,8 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
 async fn index() -> &'static str {
     "tv-obsbroadcast-scheduler engine\n\n\
      GET  /admin                 admin UI (bundled)\n\
-     GET  /overlay               broadcast overlay (bundled)\n\
+     GET  /overlay               broadcast overlay (bundled)
+     GET  /clock                 station clock overlay - 整点/半点报时 (bundled)\n\
      GET  /healthz              liveness\n\
      GET  /api/status           current engine + scheduler status\n\
      GET  /api/playlist         playlist snapshot\n\

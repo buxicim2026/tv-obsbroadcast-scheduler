@@ -25,6 +25,25 @@ pub struct BootstrapPayload {
     /// Optional scheduler settings the admin panel can save in one call.
     #[serde(default)]
     pub scheduler: Option<SchedulerPatch>,
+    /// Optional station-clock settings (整点 / 半点报时).
+    #[serde(default)]
+    pub clock: Option<ClockPatch>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ClockPatch {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub font_size_px: Option<u32>,
+    #[serde(default)]
+    pub bg_opacity_percent: Option<u8>,
+    #[serde(default)]
+    pub duration_s: Option<u32>,
+    #[serde(default)]
+    pub position: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -73,6 +92,26 @@ pub async fn bootstrap(
             }
             if let Some(v) = s.on_missing_file {
                 cfg.scheduler.on_missing_file = v;
+            }
+        }
+        if let Some(c) = payload.clock {
+            if let Some(v) = c.enabled {
+                cfg.clock.enabled = v;
+            }
+            if let Some(v) = c.font_family {
+                cfg.clock.font_family = v;
+            }
+            if let Some(v) = c.font_size_px {
+                cfg.clock.font_size_px = v.clamp(12, 400);
+            }
+            if let Some(v) = c.bg_opacity_percent {
+                cfg.clock.bg_opacity_percent = v.min(100);
+            }
+            if let Some(v) = c.duration_s {
+                cfg.clock.duration_s = v.clamp(5, 900);
+            }
+            if let Some(v) = c.position {
+                cfg.clock.position = v;
             }
         }
     }

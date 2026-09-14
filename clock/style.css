@@ -1,0 +1,72 @@
+/* clock/style.css — station clock (整点 / 半点报时).
+   Transparent background: whatever sits under this browser source stays
+   visible, exactly like a real channel ident sitting over the picture. */
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+}
+
+.clock-body {
+    width: 100%;
+    height: 100%;
+    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Padding keeps the plate off the exact edge of the canvas. */
+.clock-slot {
+    position: fixed;
+    inset: 12px;
+    display: flex;
+    pointer-events: none;
+}
+
+.clock-slot.top_left      { align-items: flex-start; justify-content: flex-start; }
+.clock-slot.top_center    { align-items: flex-start; justify-content: center; }
+.clock-slot.top_right     { align-items: flex-start; justify-content: flex-end; }
+.clock-slot.bottom_left   { align-items: flex-end;   justify-content: flex-start; }
+.clock-slot.bottom_center { align-items: flex-end;   justify-content: center; }
+.clock-slot.bottom_right  { align-items: flex-end;   justify-content: flex-end; }
+
+.clock-plate {
+    padding: 14px 26px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 14px;
+    background: rgba(8, 10, 14, 0.45);
+    text-align: center;
+    line-height: 1.05;
+    /* Kinemaster-grade: no layout jitter while the seconds change. */
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35);
+}
+
+.clock-label {
+    font-size: 20px;
+    letter-spacing: 0.42em;
+    text-indent: 0.42em;
+    opacity: 0.72;
+    margin-bottom: 6px;
+}
+
+.clock-time {
+    font-size: 72px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+}
+
+.clock-off {
+    position: fixed;
+    left: 16px;
+    top: 16px;
+    font-size: 13px;
+    opacity: 0.55;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 6px 10px;
+    border-radius: 8px;
+}

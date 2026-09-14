@@ -1128,16 +1128,60 @@ function renderPlaylistRows() {
     }
 
     const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
+    let dragId = null;
+    const clearMarks = () => tbody.querySelectorAll('tr')
+        .forEach(r => r.classList.remove('drop-above', 'drop-below'));
+
+    /// Send the new order to the engine. Rows that already aired keep their
+    /// slots; everything still to come is laid out back-to-back behind them, so
+    /// reordering never leaves a hole (which would show as black).
+    const applyOrder = async (items) => {
+        const now = Date.now();
+        const anchorItem = items.find(p => p.start_at_ms > now);
+        setPlaylistStatus('正在应用新的播出顺序…');
+        try {
+            await apiPost(API.reorder, {
+                ids: items.map(p => p.id),
+                from_id: anchorItem ? anchorItem.id : null,
+                base_start_ms: anchorItem ? anchorItem.start_at_ms : 0,
+                from_now: !anchorItem,
+            });
+            setPlaylistStatus('✅ 已应用新顺序，待播节目已自动顺排衔接', 'ok');
+            await refreshAll();
+        } catch (e) {
+            setPlaylistStatus(`调整顺序失败：${friendlyWriteError(e)}`, 'err');
+        }
+    };
+
+    const reorderByDrag = (fromId, targetId, after) => {
+        const from = playlistCache.findIndex(x => x.id === fromId);
+        if (from < 0) return;
+        const items = playlistCache.slice();
+        const [moved] = items.splice(from, 1);
+        const to = items.findIndex(x => x.id === targetId);
+        if (to < 0) return;
+        items.splice(after ? to + 1 : to, 0, moved);
+        applyOrder(items);
+    };
+
     playlistCache.forEach((p, i) => {
         const [stateLabel, stateClass] = programState(p, sch);
         const durMs = p.detected_duration_ms || p.declared_duration_ms || 0;
+        // Rows that have already started (or are on air) can't be dragged:
+        // moving them rewrites times the scheduler has already acted on.
+        const locked = p.start_at_ms <= (sch.now_ms || Date.now());
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-surface-2 transition';
+        if (locked) tr.classList.add('row-locked');
+        tr.draggable = !locked;
         tr.innerHTML = `
             <td class="py-2 pr-2">
                 <input type="checkbox" class="row-select" data-id="${p.id}" aria-label="选择该节目" />
             </td>
-            <td class="py-2 pr-2" title="${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>
+            <td class="py-2 pr-2 pl-grip"
+                title="${locked ? '该节目已开始播出，不能调整顺序' : '按住这里拖动，即可调整播出顺序'}">${locked ? '' : '⠿'}</td>
+            <td class="py-2 pr-2 pl-name"
+                title="${escapeHtml(p.name)}&#10;${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>
             <td class="py-2 pr-2">
                 <select class="form-input row-kind" data-id="${p.id}" style="min-width:108px">
                     ${PROGRAM_KINDS.map(([v, label]) =>
@@ -1154,6 +1198,41 @@ function renderPlaylistRows() {
                         ${i === playlistCache.length - 1 ? 'disabled' : ''} title="下移">↓</button>
                 <button class="btn btn-link text-red" data-act="del" data-id="${p.id}">删除</button>
             </td>`;
+        // ---- drag & drop reordering -----------------------------------
+        tr.addEventListener('dragstart', (e) => {
+            if (locked) { e.preventDefault(); return; }
+            dragId = p.id;
+            tr.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            try { e.dataTransfer.setData('text/plain', p.id); } catch (_) {}
+        });
+        tr.addEventListener('dragend', () => {
+            dragId = null;
+            tr.classList.remove('dragging');
+            clearMarks();
+        });
+        tr.addEventListener('dragover', (e) => {
+            if (!dragId || dragId === p.id || locked) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            const r = tr.getBoundingClientRect();
+            const after = (e.clientY - r.top) > r.height / 2;
+            clearMarks();
+            tr.classList.add(after ? 'drop-below' : 'drop-above');
+        });
+        tr.addEventListener('dragleave', () => {
+            tr.classList.remove('drop-above', 'drop-below');
+        });
+        tr.addEventListener('drop', (e) => {
+            if (!dragId || dragId === p.id || locked) return;
+            e.preventDefault();
+            const r = tr.getBoundingClientRect();
+            const after = (e.clientY - r.top) > r.height / 2;
+            const from = dragId;
+            clearMarks();
+            reorderByDrag(from, p.id, after);
+        });
+
         tbody.appendChild(tr);
     });
 
@@ -1223,6 +1302,10 @@ function setupSettings() {
     document.getElementById('cfg-test').addEventListener('click', testCfg);
     const refreshInputs = document.getElementById('cfg-refresh-inputs');
     if (refreshInputs) refreshInputs.addEventListener('click', loadObsInputs);
+    const clockPreview = document.getElementById('cfg-clock-open');
+    if (clockPreview) {
+        clockPreview.addEventListener('click', () => window.open('/clock', '_blank'));
+    }
     loadObsInputs();
 }
 
@@ -1302,6 +1385,16 @@ function renderSettingsForm() {
     setVal('cfg-lead-in', sc.lead_in_ms != null ? sc.lead_in_ms : 200);
     setVal('cfg-clock-offset', sc.clock_offset_ms != null ? sc.clock_offset_ms : 0);
     setVal('cfg-missing-policy', sc.on_missing_file || 'skip_to_next');
+
+    // 电视台报时器
+    const ck = snap.clock || (snap.config && snap.config.clock) || {};
+    const ckEn = document.getElementById('cfg-clock-enabled');
+    if (ckEn && (!active || active.id !== 'cfg-clock-enabled')) ckEn.checked = !!ck.enabled;
+    setVal('cfg-clock-font', ck.font_family || '');
+    setVal('cfg-clock-size', ck.font_size_px != null ? ck.font_size_px : 72);
+    setVal('cfg-clock-bg', ck.bg_opacity_percent != null ? ck.bg_opacity_percent : 45);
+    setVal('cfg-clock-duration', ck.duration_s != null ? ck.duration_s : 60);
+    setVal('cfg-clock-position', ck.position || 'top_right');
 }
 
 async function saveCfg() {
@@ -1317,6 +1410,14 @@ async function saveCfg() {
             lead_in_ms: parseInt(document.getElementById('cfg-lead-in').value, 10) || 200,
             clock_offset_ms: parseInt(document.getElementById('cfg-clock-offset').value, 10) || 0,
             on_missing_file: document.getElementById('cfg-missing-policy').value,
+        },
+        clock: {
+            enabled: document.getElementById('cfg-clock-enabled').checked,
+            font_family: document.getElementById('cfg-clock-font').value,
+            font_size_px: parseInt(document.getElementById('cfg-clock-size').value, 10) || 72,
+            bg_opacity_percent: Math.max(0, parseInt(document.getElementById('cfg-clock-bg').value, 10) || 0),
+            duration_s: parseInt(document.getElementById('cfg-clock-duration').value, 10) || 60,
+            position: document.getElementById('cfg-clock-position').value,
         },
     };
     const status = document.getElementById('cfg-status');
