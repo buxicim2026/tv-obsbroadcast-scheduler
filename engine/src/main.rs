@@ -153,6 +153,12 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Watch the bridge files the OBS Lua script writes. Doing settings over a
+    // file instead of HTTP is what keeps OBS from flashing console windows: the
+    // script never has to shell out to curl, and it can read status.json to see
+    // that an engine is already running.
+    tokio::spawn(tvbs_engine::bridge::run(state.clone(), port));
+
     // Serve admin + overlay (admin/ and overlay/ are embedded at compile time).
     let dist = embedded::dist();
     let router = server::build_router(state.clone(), dist).into_make_service();

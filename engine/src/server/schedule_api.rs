@@ -10,10 +10,14 @@
 use std::sync::Arc;
 
 use axum::extract::Query;
-use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
-use tracing::info;
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::info;
 
 use crate::{app_status::AppStatus, AppState};
 
@@ -198,7 +202,9 @@ pub async fn reorder(
             .map(|(i, id)| (id.clone(), i))
             .collect();
         let max_rank = rank.len();
-        cfg.playlist.items.sort_by_key(|p| rank.get(&p.id).copied().unwrap_or(max_rank));
+        cfg.playlist
+            .items
+            .sort_by_key(|p| rank.get(&p.id).copied().unwrap_or(max_rank));
 
         // Anything before `from_id` already aired (or is on air) and keeps its
         // slot; only the pending tail gets re-laid so no gap is left behind.
@@ -233,7 +239,9 @@ pub async fn reorder(
     };
     let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     persist(state.config.clone()).await?;
-    Ok(Json(json!({"ok": true, "items": items, "ends_at_ms": ends_at})))
+    Ok(Json(
+        json!({"ok": true, "items": items, "ends_at_ms": ends_at}),
+    ))
 }
 
 /// Arm the scheduler AND re-base the list on the moment the operator actually
@@ -280,8 +288,8 @@ pub async fn start_scheduler(
 
 /// Media / image extensions offered by the file browser.
 const MEDIA_EXT: &[&str] = &[
-    "mp4", "mkv", "mov", "avi", "ts", "mxf", "mpg", "mpeg", "flv", "wmv", "webm", "m4v",
-    "mp3", "wav", "aac", "flac",
+    "mp4", "mkv", "mov", "avi", "ts", "mxf", "mpg", "mpeg", "flv", "wmv", "webm", "m4v", "mp3",
+    "wav", "aac", "flac",
 ];
 const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 
@@ -349,7 +357,10 @@ pub async fn browse(Query(q): Query<BrowseQuery>) -> Json<Value> {
         }
     }
     let by_name = |a: &Value, b: &Value| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
     };
     dirs.sort_by(by_name);
     files.sort_by(by_name);
@@ -423,18 +434,23 @@ pub async fn upload_media(
     // sane single programme file and still generous for long-form broadcast.
     const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
     if body.len() > MAX_UPLOAD_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "文件过大（上限 4GB）".into(),
-        ));
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "文件过大（上限 4GB）".into()));
     }
 
     let dir = media_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("创建媒体目录失败: {e}")))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("创建媒体目录失败: {e}"),
+        )
+    })?;
     let target = unique_path(dir.join(&file_name));
-    std::fs::write(&target, &body)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入文件失败: {e}")))?;
+    std::fs::write(&target, &body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写入文件失败: {e}"),
+        )
+    })?;
 
     info!("stored uploaded media at {}", target.display());
     Ok(Json(json!({
@@ -535,9 +551,7 @@ pub async fn verify(State(state): State<Arc<AppState>>) -> Json<Value> {
         .playlist
         .items
         .iter()
-        .filter(|p| {
-            p.file_path.trim().is_empty() || !std::path::Path::new(&p.file_path).exists()
-        })
+        .filter(|p| p.file_path.trim().is_empty() || !std::path::Path::new(&p.file_path).exists())
         .map(|p| p.id.clone())
         .collect();
     Json(json!({"missing": missing}))

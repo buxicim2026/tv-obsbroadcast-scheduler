@@ -15,10 +15,14 @@
 ## 快速开始
 
 1. 在 OBS 中启用 obs-websocket 插件（**工具 → obs-websocket 设置**，记下端口和密码）
-2. 在 OBS 场景里加一个 **媒体源**（Media Source / VLC Source），命名为你想要的即可
-3. 启动本插件后，在场景里加一个 **Broadcast Scheduler Control** 源，填入 obs-websocket 的连接信息
-4. 在弹出的属性面板里开始添加节目项（每项有文件路径 + 起始时间 + 声明时长）
-5. 启用自动播出 → 引擎接管
+2. 在 OBS 场景里加一个 **媒体源**（Media Source），命名为你想要的即可
+3. 在 OBS 里加载本脚本：**工具 → 脚本 → "+" → 选择 tv_obsbroadcast_scheduler.lua**
+4. 在脚本属性里填 obs-websocket 连接信息与受控媒体源名称，点 **Open Admin in Browser**
+5. 在网页里开始排节目单 → 启用自动播出 → 引擎接管
+
+> 不需要往场景里添加任何插件自带的"控制源"。旧版本曾经注册过一个名为
+> *Broadcast Scheduler Control* 的隐藏源，**现已移除**：如果你之前加过，
+> 请把它从场景里删掉（不影响使用）。
 
 ## 安装
 
@@ -63,16 +67,15 @@ OBS Studio 28+ 自带 obs-websocket 5 插件。首次启用：
 
 在 OBS 场景中：
 
-1. **媒体源**（第一步先准备，确保视频能正常播放）：右键场景 → 添加 → 媒体源 → 命名（例如 `main_media`）
-2. **Broadcast Scheduler Control**（第二步让插件调度它）：右键场景 → 添加 → Broadcast Scheduler Control
+只需要一个源：**媒体源**。右键场景 → 添加 → 媒体源 → 命名（例如 `main_media`）。
 
 `main_media` 必须是 **媒体源**（ffmpeg_source）才支持自动切文件。其它类型源不支持硬切。
 
 ## 编辑节目表
 
-**面板 1：原生属性面板**
+**面板 1：脚本属性面板**
 
-在场景中选中 *Broadcast Scheduler Control* → 右键 → **属性**：
+OBS 菜单 **工具 → 脚本**，选中 *tv_obsbroadcast_scheduler.lua* → **属性**（或点右侧的脚本设置）：
 
 - 顶部 **OBS WebSocket 连接**：主机 / 端口 / 密码 + **连接测试** 按钮
 - **受控媒体源名称**：填场景里那个媒体源的名称（例如 `main_media`）

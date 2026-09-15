@@ -359,13 +359,7 @@ impl Scheduler {
                         // next advertised start time.
                         self.resequence_after(state, &next.id, end_at);
                         self.transition_to_playing(
-                            state,
-                            &next.id,
-                            &next.name,
-                            dur,
-                            now_ms,
-                            end_at,
-                            machine,
+                            state, &next.id, &next.name, dur, now_ms, end_at, machine,
                         );
                         let mut st = state.status.write();
                         st.paused = false;
@@ -377,10 +371,8 @@ impl Scheduler {
                         // source, arm for the one after it instead.
                         warn!("skip: '{}' has no media file; arming past it", next.name);
                         let lead_in = cfg.scheduler.lead_in_ms as i64;
-                        match crate::playlist::next_program(
-                            cfg,
-                            next.start_at_ms.saturating_add(1),
-                        ) {
+                        match crate::playlist::next_program(cfg, next.start_at_ms.saturating_add(1))
+                        {
                             Some(n2) => {
                                 let fire_at = n2.start_at_ms.saturating_sub(lead_in);
                                 self.transition_to_armed(state, n2, fire_at, machine);
@@ -615,8 +607,7 @@ impl Scheduler {
                                 );
                                 match program_after(cfg, &next.id) {
                                     Some(n2) => {
-                                        let fire_at =
-                                            n2.start_at_ms.saturating_sub(lead_in as i64);
+                                        let fire_at = n2.start_at_ms.saturating_sub(lead_in as i64);
                                         self.transition_to_armed(state, n2, fire_at, machine);
                                     }
                                     None => self.become_idle(state, machine),
@@ -934,8 +925,7 @@ impl Scheduler {
         let Some(client) = self.client() else {
             return;
         };
-        let Some(dur) =
-            crate::media_probe::probe_duration_ms(&client, &self.target_input).await
+        let Some(dur) = crate::media_probe::probe_duration_ms(&client, &self.target_input).await
         else {
             return;
         };
@@ -959,7 +949,7 @@ impl Scheduler {
             ..
         } = machine
         {
-            if program_id == &p.id {
+            if program_id.as_str() == p.id.as_str() {
                 if let Some(end) = new_end {
                     *end_at_ms = end;
                 }
@@ -1088,10 +1078,8 @@ impl Scheduler {
                 state.status.write().last_error = Some(msg);
             }
             Err(e) => {
-                state.status.write().last_error = Some(format!(
-                    "复查媒体源 '{}' 失败：{e}",
-                    target_input
-                ));
+                state.status.write().last_error =
+                    Some(format!("复查媒体源 '{}' 失败：{e}", target_input));
             }
         }
     }

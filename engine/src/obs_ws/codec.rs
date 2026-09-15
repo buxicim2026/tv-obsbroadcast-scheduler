@@ -395,7 +395,11 @@ fn resolve_response(v: &Value, pending: &Arc<Mutex<HashMap<u64, Pending>>>) {
         }
         Pending::Inputs(tx) => {
             let _ = if ok {
-                let items = data.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let items = data
+                    .get("inputs")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let list = items
                     .into_iter()
                     .filter_map(|v| serde_json::from_value::<InputInfo>(v).ok())

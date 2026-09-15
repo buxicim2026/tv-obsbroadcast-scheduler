@@ -49,7 +49,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | `src/plugin.c` | `obs_module_load/unload`，注册 source kind、拉起并监控引擎 |
-| `src/source.c` | 注册 *Broadcast Scheduler Control* source kind |
+| `src/source.c` | 注册 *Broadcast Scheduler Control* source kind（**历史设计**，见下方说明） |
 | `src/source_properties.c` | Qt 属性面板：OBS-WS 配置、target_input、scheduler 开关、测试连接、Open Admin 按钮 |
 | `src/engine_proc.c` + `src/platform/*` | 拉起 / 终结 Rust 引擎子进程；Win 用 JobObject，POSIX 用 fork+prctl，macOS 用 posix_spawn |
 
@@ -98,7 +98,7 @@ engine/src/
 
 1. OBS 启动 → 加载 `tv-obsbroadcast-scheduler(.dll/.so/.dylib)`
 2. `obs_module_load` →
-   - 注册 *Broadcast Scheduler Control* source kind
+   - 注册 *Broadcast Scheduler Control* source kind —— **当前版本已不再注册任何 source kind**
    - 拉起 Rust 引擎子进程（包含 JobObject 防止 OBS 崩溃时孤儿）
    - 启动引擎监控线程（引擎崩溃后自动拉起）
 3. 引擎启动 → 读取本地 `config.json`（凭据 / 节目表）→ 起 axum 服务 :8789
@@ -176,7 +176,7 @@ OBS 退出时：
 
 OBS 重启后：
 
-- 用户重新打开 Broadcast Scheduler Control 源
+- OBS 重新加载 Lua 脚本（不再需要用户手动打开任何源）
 - 引擎子进程被重新拉起
 - 重新加载节目表，状态从中断点续接
 

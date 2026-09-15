@@ -2,6 +2,7 @@
 //! individual modules without spawning the binary.
 
 pub mod app_status;
+pub mod bridge;
 pub mod config;
 pub mod embedded;
 pub mod interrupt;

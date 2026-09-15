@@ -62,55 +62,91 @@ local function file_exists(p)
   return false
 end
 
------------------------------------------------------------------- HTTP ---
--- 引擎暴露本地 HTTP API。用 curl（Win10+ / macOS / 常见 Linux 都自带）
--- 完成请求，避免依赖 LuaSocket。
+-------------------------------------------------------------- 文件桥 ----
+-- OBS 的 Lua 没有进程 / 网络接口，任何 os.execute / io.popen 在 Windows 上
+-- 都要经由 cmd.exe —— 而 OBS 自己没有控制台，于是每调一次就闪一个黑框：
+-- 启动时探测 healthz 就要调十几次，退出时再来一次。
+--
+-- 所以日常工作改成**纯文件读写**（不起任何子进程）：
+--   脚本  --写-->  bridge.json  --读-->  引擎
+--   引擎  --写-->  status.json  --读-->  脚本
+-- 唯一还会起进程的地方是"引擎确实没在运行、需要拉起它"，而且只在那时。
 
-local function curl_bin()
-  return IS_WIN and "curl.exe" or "curl"
+local SEP = IS_WIN and "\\" or "/"
+local BRIDGE_NAME = "bridge.json"
+local STATUS_NAME = "status.json"
+
+-- 目录统一以分隔符结尾，拼接文件名时才不会把路径和文件名粘在一起。
+local function norm_dir(d)
+  if d == nil or d == "" then return d end
+  if d:sub(-1) ~= SEP then d = d .. SEP end
+  return d
 end
 
-local TMP_FILE = nil
-local function tmp_file()
-  if TMP_FILE == nil then TMP_FILE = script_dir() .. "_tvbs_body.json" end
-  return TMP_FILE
+-- 引擎可能在便携模式（配置放在脚本目录下）或用户模式（%APPDATA% / ~/.config），
+-- 我们两个位置都写、都读，取最新的那份。
+local function bridge_dirs()
+  local dirs = { norm_dir(script_dir()) }
+  if IS_WIN then
+    local appdata = os.getenv("APPDATA")
+    if appdata then
+      dirs[#dirs + 1] = norm_dir(appdata .. "\\tv-obsbroadcast-scheduler")
+    end
+  elseif IS_MAC then
+    local home = os.getenv("HOME")
+    if home then
+      dirs[#dirs + 1] = norm_dir(
+        home .. "/Library/Application Support/tv-obsbroadcast-scheduler")
+    end
+  else
+    local base = os.getenv("XDG_CONFIG_HOME")
+    if (base == nil or base == "") and os.getenv("HOME") then
+      base = os.getenv("HOME") .. "/.config"
+    end
+    if base then
+      dirs[#dirs + 1] = norm_dir(base .. "/tv-obsbroadcast-scheduler")
+    end
+  end
+  return dirs
 end
 
-local function http(method, api_path, body, bootstrap_token)
-  local cmd = curl_bin() .. " -s -m 4 -X " .. method
-  if body ~= nil then
-    cmd = cmd .. ' -H "Content-Type: application/json"'
-  end
-  if bootstrap_token ~= nil then
-    cmd = cmd .. ' -H "X-Bootstrap-Token: ' .. bootstrap_token .. '"'
-  end
-  if body ~= nil then
-    local tf = tmp_file()
-    local f = io.open(tf, "w")
-    if f ~= nil then f:write(body); f:close() end
-    cmd = cmd .. ' -d "@' .. tf .. '"'
-  end
-  cmd = cmd
-    .. ' -w "\\n%{http_code}" http://'
-    .. ENGINE_HOST .. ":" .. ENGINE_PORT .. api_path
-  if not IS_WIN then cmd = cmd .. " 2>/dev/null" end
+local function write_file(path, data)
+  local f = io.open(path, "wb")
+  if f == nil then return false end
+  f:write(data)
+  f:close()
+  return true
+end
 
-  local handle = io.popen(cmd)
-  local out = ""
-  if handle ~= nil then
-    out = handle:read("*a") or ""
-    handle:close()
+local function read_file(path)
+  local f = io.open(path, "rb")
+  if f == nil then return nil end
+  local s = f:read("*a")
+  f:close()
+  return s
+end
+
+-- 引擎每 500ms 刷新一次 status.json；读到 6 秒内的时间戳即认为它活着。
+local function engine_alive()
+  for _, dir in ipairs(bridge_dirs()) do
+    local s = read_file(dir .. STATUS_NAME)
+    if s then
+      local ts = tonumber(string.match(s, '"ts"%s*:%s*(%d+)'))
+      if ts and (os.time() * 1000 - ts) < 6000 then return true end
+    end
   end
-  local code = string.match(out, "(%d%d%d)%s*$")
-  return out, code
+  return false
+end
+
+local function status_text()
+  for _, dir in ipairs(bridge_dirs()) do
+    local s = read_file(dir .. STATUS_NAME)
+    if s then return s end
+  end
+  return nil
 end
 
 ---------------------------------------------------------------- 引擎进程 ---
-
-local function engine_alive()
-  local _, code = http("GET", "/healthz")
-  return code == "200"
-end
 
 local function spawn_engine()
   local exe = engine_path()
@@ -119,8 +155,9 @@ local function spawn_engine()
     return false
   end
   if IS_WIN then
-    -- /B = same (invisible) session, no new console. The engine is built as a
-    -- windows-subsystem binary so it never allocates a console window.
+    -- 这是启动路径上唯一还会创建 cmd.exe 的地方（Lua 只能这样起进程），
+    -- 且只在引擎确实没跑时发生一次。/B 表示不新建窗口；引擎本身是
+    -- windows-subsystem 程序，不会有自己的控制台。
     os.execute("start " .. q("") .. " /B " .. q(exe))
   else
     os.execute(q(exe) .. " >/dev/null 2>&1 &")
@@ -129,11 +166,19 @@ local function spawn_engine()
   return true
 end
 
+-- 先看看引擎是不是已经在跑（读文件，不起进程）；只有没在跑才拉起它。
 local function ensure_engine()
-  if engine_alive() then
-    return true
+  if engine_alive() then return true end
+  spawn_engine()
+  -- 轮询 status.json 而不是 HTTP：不起任何子进程。引擎正常时不到一秒就
+  -- 会写出 status.json；只有它起不来才会等满。
+  local deadline = os.clock() + 4
+  while os.clock() < deadline do
+    if engine_alive() then return true end
+    local until_ = os.clock() + 0.2
+    while os.clock() < until_ do end
   end
-  return spawn_engine()
+  return engine_alive()
 end
 
 ------------------------------------------------------------------ 配置 ---
@@ -161,58 +206,44 @@ local function ensure_token(settings)
   return token
 end
 
--- 等引擎 HTTP 端口就绪（刚 spawn 的进程需要一点时间监听）。
--- os.clock 忙等：脚本环境没有可靠的 sleep，且这里最多阻塞 3 秒。
-local function wait_engine(seconds)
-  local deadline = os.clock() + (seconds or 3)
-  while os.clock() < deadline do
-    local _, code = http("GET", "/healthz")
-    if code == "200" then return true end
-    local until_ = os.clock() + 0.25
-    while os.clock() < until_ do end
-  end
-  return false
-end
-
--- 把当前 settings 推给引擎（bootstrap + 调度开关）。
+-- 把当前 settings 交给引擎：写一份 bridge.json，引擎自己来取。
 -- apply_enabled=false：只送凭据，**不要**恢复上次的自动播出状态。
 -- OBS 启动（脚本加载）后应处于待命，由操作员在面板/网页里手动开启。
-local function push_settings(settings, apply_enabled)
-  if settings == nil then return false end
-  ensure_engine()
-  if not wait_engine(3) then
-    obs.blog(obs.LOG_WARNING,
-      LOG_TAG .. "engine not answering /healthz yet — settings not pushed; "
-      .. "open the script panel and press Test Connection once OBS is idle")
-    return false
-  end
-
+-- open_admin=true：顺便请引擎帮我们打开浏览器（自己起进程会闪命令行窗口）。
+local function build_payload(settings, apply_enabled, open_admin)
   local token = ensure_token(settings)
-  local payload = string.format(
-    '{"bootstrap_token":"%s","host":"%s","port":%d,"password":"%s",'
-      .. '"tls":%s,"target_input":"%s"}',
+  local enabled = (apply_enabled ~= false)
+    and obs.obs_data_get_bool(settings, "scheduler_enabled")
+  return string.format(
+    '{\n  "bootstrap_token": "%s",\n  "host": "%s",\n  "port": %d,\n'
+      .. '  "password": "%s",\n  "tls": %s,\n  "target_input": "%s",\n'
+      .. '  "enabled": %s,\n  "open_admin": %s,\n  "ts": %d\n}\n',
     json_escape(token),
     json_escape(obs.obs_data_get_string(settings, "ws_host")),
     obs.obs_data_get_int(settings, "ws_port"),
     json_escape(obs.obs_data_get_string(settings, "ws_password")),
     obs.obs_data_get_bool(settings, "ws_tls") and "true" or "false",
-    json_escape(obs.obs_data_get_string(settings, "target_input"))
+    json_escape(obs.obs_data_get_string(settings, "target_input")),
+    enabled and "true" or "false",
+    open_admin and "true" or "false",
+    os.time() * 1000
   )
+end
 
-  local _, code = http("POST", "/api/bootstrap", payload)
-  if code ~= "200" then
+local function push_settings(settings, apply_enabled, open_admin)
+  if settings == nil then return false end
+  local payload = build_payload(settings, apply_enabled, open_admin == true)
+  local written = 0
+  for _, dir in ipairs(bridge_dirs()) do
+    if write_file(dir .. BRIDGE_NAME, payload) then
+      written = written + 1
+    end
+  end
+  if written == 0 then
     obs.blog(obs.LOG_WARNING,
-      LOG_TAG .. "bootstrap failed (HTTP " .. tostring(code)
-        .. ") — engine running? see http://" .. ENGINE_HOST .. ":" .. ENGINE_PORT .. "/healthz")
+      LOG_TAG .. "could not write bridge.json next to the script — settings not delivered")
     return false
   end
-
-  local enabled = (apply_enabled ~= false)
-    and obs.obs_data_get_bool(settings, "scheduler_enabled")
-  local _, en_code = http("POST", "/api/scheduler/enable",
-    string.format('{"enabled":%s}', enabled and "true" or "false"), token)
-  obs.blog(obs.LOG_INFO, LOG_TAG .. "settings pushed (scheduler_enabled="
-    .. tostring(enabled) .. ", enable->HTTP " .. tostring(en_code) .. ")")
   return true
 end
 
@@ -235,32 +266,30 @@ function on_test_clicked(props, property)
     obs.blog(obs.LOG_WARNING, LOG_TAG .. "engine could not be started")
     return true
   end
-  local body, code = http("GET", "/healthz")
-  obs.blog(obs.LOG_INFO, LOG_TAG .. "healthz -> HTTP " .. tostring(code) .. " " .. tostring(body))
-  if code == "200" and script_settings ~= nil then
-    if push_settings(script_settings) then
-      obs.blog(obs.LOG_INFO,
-        LOG_TAG .. "Test Connection OK: credentials + token delivered to the engine")
-    else
-      obs.blog(obs.LOG_WARNING,
-        LOG_TAG .. "Test Connection: engine reachable but settings were NOT accepted "
-        .. "(see the lines above) — check OBS menu Help > Log Files > View Current Log")
-    end
+  if script_settings ~= nil then push_settings(script_settings) end
+  local s = status_text()
+  if s == nil then
+    obs.blog(obs.LOG_WARNING,
+      LOG_TAG .. "engine has not written status.json yet — try again in a second")
+    return true
   end
+  local version = string.match(s, '"engine_version"%s*:%s*"([^"]*)"') or "?"
+  local connected = string.match(s, '"obs_connected"%s*:%s*(%a+)')
+  local state = string.match(s, '"scheduler_state"%s*:%s*"([^"]*)"') or "?"
+  obs.blog(obs.LOG_INFO, string.format(
+    "%sTest Connection: engine v%s, obs_connected=%s, state=%s — admin: http://%s:%d/admin",
+    LOG_TAG, version, tostring(connected), state, ENGINE_HOST, ENGINE_PORT))
   return true
 end
 
 function on_open_admin_clicked(props, property)
   ensure_engine()
-  local url = "http://" .. ENGINE_HOST .. ":" .. ENGINE_PORT .. "/admin"
-  if IS_WIN then
-    os.execute("start " .. q("") .. " " .. q(url))
-  elseif IS_MAC then
-    os.execute("open " .. q(url))
-  else
-    os.execute("xdg-open " .. q(url) .. " >/dev/null 2>&1 &")
+  -- 请引擎帮我们打开浏览器：脚本自己 os.execute 会闪一个命令行窗口。
+  if script_settings ~= nil then
+    push_settings(script_settings, false, true)
   end
-  obs.blog(obs.LOG_INFO, LOG_TAG .. "opened " .. url)
+  obs.blog(obs.LOG_INFO, LOG_TAG .. "asked the engine to open http://"
+    .. ENGINE_HOST .. ":" .. ENGINE_PORT .. "/admin")
   return true
 end
 

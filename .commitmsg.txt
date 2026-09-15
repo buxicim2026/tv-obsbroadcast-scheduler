@@ -1,0 +1,24 @@
+fix: no console windows on OBS start / exit
+
+Every os.execute / io.popen from the OBS Lua script goes through cmd.exe on
+Windows, and OBS has no console of its own, so each call flashed a black window.
+Startup was the worst: the readiness probe fired a curl every 250ms (up to a
+dozen windows), and shutdown did it again for the settings save.
+
+The script now does plain file IO only for the routine work:
+- it writes bridge.json (credentials, target source, arm flag, "open admin"
+  request) and the engine picks it up, no subprocess involved
+- it reads status.json (written by the engine once a second) to see whether an
+  engine is already running and to report the OBS link in Test Connection
+- opening the admin page is a flag in bridge.json: the engine, being a
+  windowless binary, launches the browser via rundll32 / open / xdg-open
+
+The only remaining subprocess is launching the engine, and only when status.json
+shows no engine is already up - so the common case (OBS restart, reloading the
+script) now spawns nothing at all.
+
+New engine module `bridge` watches the file and answers with status.json; both
+live beside config.json and beside the script so portable and user-mode installs
+both work.
+
+Also: rustfmt (CI runs cargo fmt --check).
