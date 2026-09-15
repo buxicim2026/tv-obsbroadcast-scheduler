@@ -377,6 +377,7 @@ impl Default for Config {
             bootstrap_token: None,
             clock: ClockConfig::default(),
             time_sync: TimeSyncConfig::default(),
+            bootstrapped: false,
         }
     }
 }
