@@ -7,6 +7,7 @@ pub mod config;
 pub mod embedded;
 pub mod interrupt;
 pub mod media_probe;
+pub mod ntp;
 pub mod obs_ws;
 pub mod playlist;
 pub mod scheduler;

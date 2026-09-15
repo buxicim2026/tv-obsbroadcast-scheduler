@@ -11,11 +11,17 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::config::{BumperEntry, Config, ProgramEntry, ProgramKind, SchedulerConfig};
 
 /// Returns the effective wall clock the scheduler should use.
-/// Applies `scheduler.clock_offset_ms` so the user can align with an external
-/// time base (e.g. broadcast clock).
+///
+/// Two corrections stack on top of the local clock:
+///   * `scheduler.clock_offset_ms` — the operator's manual trim against an
+///     external master clock;
+///   * the NTP offset — measured against 国家授时中心, so a wrong PC clock
+///     (flat battery, bad manual change, broken domain controller) no longer
+///     moves the schedule or the on-screen 报时 off true time.
 pub fn effective_now_ms(cfg: &SchedulerConfig) -> i64 {
     let raw = Utc::now().timestamp_millis();
     raw.saturating_add(cfg.clock_offset_ms)
+        .saturating_add(crate::ntp::ntp_offset_ms())
 }
 
 /// `now_ms` falls in `[start_at_ms, start_at_ms + declared_duration_ms)`.

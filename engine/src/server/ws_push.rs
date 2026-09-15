@@ -99,6 +99,15 @@ fn snapshot(state: &AppState) -> serde_json::Value {
         // its font/size/opacity from the snapshot, so dropping it here would
         // leave the overlay rendering the defaults forever.
         "clock": cfg.clock,
+        // The station clock corrects itself with this, and the admin shows
+        // "synced to X, offset Yms" — both need it on every push, not just on
+        // the initial HTTP fetch.
+        "ntp": {
+            "offset_ms": st.ntp_offset_ms,
+            "server": st.ntp_server,
+            "synced_at": st.ntp_synced_at,
+            "error": st.ntp_error,
+        },
         // The admin panel replaces its whole snapshot with this frame on every
         // push. Without the token here the UI lost it ~2x a second and every
         // write came back 401 ("not authorised") even though the token existed.

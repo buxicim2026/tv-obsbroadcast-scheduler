@@ -14,6 +14,7 @@ const API = {
     enable: '/api/scheduler/enable',
     start: '/api/scheduler/start',
     pause: '/api/scheduler/pause',
+    timeSync: '/api/time/sync',
     next: '/api/scheduler/next',
     reload: '/api/scheduler/reload',
     reorder: '/api/playlist/reorder',
@@ -1393,6 +1394,56 @@ const CLOCK_FONT_FALLBACK = [
 ];
 
 /// 下拉里选中某个字体名后写进输入框的 CSS 值（带中英文回退，避免缺字）。
+/// 授时状态：让"时间到底准不准"这件事在界面上看得见。
+function renderNtpStatus(ntp) {
+    const el = document.getElementById('cfg-ntp-status');
+    if (!el) return;
+    if (!ntp) {
+        el.textContent = '';
+        return;
+    }
+    if (ntp.error) {
+        el.textContent = `⚠ ${ntp.error}`;
+        return;
+    }
+    if (ntp.offset_ms == null) {
+        el.textContent = '尚未同步';
+        return;
+    }
+    const sign = ntp.offset_ms >= 0 ? '+' : '';
+    const when = ntp.synced_at ? `｜${fmtBeijing(new Date(ntp.synced_at).getTime())}` : '';
+    el.textContent = `${ntp.server || '已授时'}｜偏差 ${sign}${ntp.offset_ms}ms${when}`;
+}
+
+/// 手动触发一次授时，不用等下一个同步周期。
+async function syncTimeNow() {
+    const el = document.getElementById('cfg-ntp-status');
+    if (el) el.textContent = '正在授时…';
+    try {
+        const res = await writeWithAuth((headers) => fetch(API.timeSync, {
+            method: 'POST',
+            headers,
+            body: '{}',
+        }));
+        const text = await res.text().catch(() => '');
+        if (!res.ok) {
+            const msg = text || `HTTP ${res.status}`;
+            if (el) el.textContent = `授时失败：${msg}`;
+            log(`授时失败：${msg}`);
+            return;
+        }
+        let body = {};
+        try { body = JSON.parse(text); } catch (_) {}
+        const sign = (body.offset_ms || 0) >= 0 ? '+' : '';
+        if (el) el.textContent = `${body.server || '已授时'}｜偏差 ${sign}${body.offset_ms}ms`;
+        log(`授时成功：${body.server}（偏差 ${body.offset_ms}ms）`);
+        await refreshAll();
+    } catch (e) {
+        if (el) el.textContent = `授时失败：${(e && e.message) || e}`;
+        log(`授时失败：${(e && e.message) || e}`);
+    }
+}
+
 function fontCssValue(name) {
     return `'${name}', 'Microsoft YaHei', 'PingFang SC', sans-serif`;
 }
@@ -1464,6 +1515,8 @@ function setupSettings() {
         clockPreview.addEventListener('click', () => window.open('/clock', '_blank'));
     }
     setupClockFontPicker();
+    const ntpBtn = document.getElementById('cfg-ntp-sync');
+    if (ntpBtn) ntpBtn.addEventListener('click', syncTimeNow);
     loadObsInputs();
 }
 
@@ -1555,6 +1608,14 @@ function renderSettingsForm() {
     setVal('cfg-clock-lead', ck.lead_s != null ? ck.lead_s : 30);
     setVal('cfg-clock-plate', ck.plate_style || 'pill');
     setVal('cfg-clock-position', ck.position || 'top_right');
+    // 授时
+    const ts = snap.time_sync || (snap.config && snap.config.time_sync) || {};
+    const ntpEn = document.getElementById('cfg-ntp-enabled');
+    if (ntpEn && (!active || active.id !== 'cfg-ntp-enabled')) ntpEn.checked = ts.enabled !== false;
+    setVal('cfg-ntp-servers', (ts.servers || []).join(', '));
+    setVal('cfg-ntp-interval', ts.interval_min != null ? ts.interval_min : 30);
+    renderNtpStatus(snap.ntp);
+
     // 反查字体下拉：当前值正好是列表里某项生成的 CSS 时才回选，否则留空。
     const fontSel = document.getElementById('cfg-clock-font-list');
     if (fontSel && (!active || active.id !== 'cfg-clock-font-list')) {
@@ -1588,6 +1649,12 @@ async function saveCfg() {
             lead_s: Math.max(0, parseInt(document.getElementById('cfg-clock-lead').value, 10) || 0),
             plate_style: document.getElementById('cfg-clock-plate').value,
             position: document.getElementById('cfg-clock-position').value,
+        },
+        time_sync: {
+            enabled: document.getElementById('cfg-ntp-enabled').checked,
+            servers: String(document.getElementById('cfg-ntp-servers').value || '')
+                .split(',').map(s => s.trim()).filter(Boolean),
+            interval_min: parseInt(document.getElementById('cfg-ntp-interval').value, 10) || 30,
         },
     };
     const status = document.getElementById('cfg-status');

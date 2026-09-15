@@ -25,6 +25,25 @@ pub struct Config {
     /// Station clock overlay (整点 / 半点报时).
     #[serde(default)]
     pub clock: ClockConfig,
+    /// Keeping true time via NTP (国家授时中心).
+    #[serde(default)]
+    pub time_sync: TimeSyncConfig,
+}
+
+/// Where the engine gets real time from. A broadcast clock cannot trust the
+/// operator's PC: a flat CMOS battery or a manual change would silently move
+/// every programme — and the on-screen 报时 — off true time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeSyncConfig {
+    /// Off means we run on the local clock (previous behaviour).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Tried in order; the first one that answers wins.
+    #[serde(default = "default_ntp_servers")]
+    pub servers: Vec<String>,
+    /// How often to re-sync, in minutes.
+    #[serde(default = "default_ntp_interval_min")]
+    pub interval_min: u32,
 }
 
 /// A TV-station style clock that pops up on the hour and half-hour, like the
@@ -202,6 +221,21 @@ fn default_clock_plate_style() -> String {
 fn default_clock_position() -> String {
     "top_right".to_string()
 }
+fn default_true() -> bool {
+    true
+}
+/// 中国科学院国家授时中心 first, then the China pool, then the global pool as
+/// a last resort (a machine with no route to China still gets true time).
+fn default_ntp_servers() -> Vec<String> {
+    vec![
+        "ntp.ntsc.ac.cn".to_string(),
+        "cn.ntp.org.cn".to_string(),
+        "pool.ntp.org".to_string(),
+    ]
+}
+fn default_ntp_interval_min() -> u32 {
+    30
+}
 
 impl Default for MissingFilePolicy {
     fn default() -> Self {
@@ -230,6 +264,16 @@ impl Default for SchedulerConfig {
             clock_offset_ms: 0,
             enabled: false,
             on_missing_file: MissingFilePolicy::default(),
+        }
+    }
+}
+
+impl Default for TimeSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            servers: default_ntp_servers(),
+            interval_min: default_ntp_interval_min(),
         }
     }
 }
@@ -325,6 +369,7 @@ impl Default for Config {
             playlist: PlaylistState::default(),
             bootstrap_token: None,
             clock: ClockConfig::default(),
+            time_sync: TimeSyncConfig::default(),
         }
     }
 }

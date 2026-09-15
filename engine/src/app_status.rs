@@ -30,4 +30,12 @@ pub struct AppStatus {
     pub last_changed_at: Option<DateTime<Utc>>,
     /// Most recent failure (e.g., media file missing). Cleared by the user.
     pub last_error: Option<String>,
+    /// Offset (ms) to add to this machine's clock to get true time, from NTP.
+    pub ntp_offset_ms: Option<i64>,
+    /// Which server provided the current offset.
+    pub ntp_server: Option<String>,
+    /// When we last heard from a time server.
+    pub ntp_synced_at: Option<DateTime<Utc>>,
+    /// Why the last sync attempt failed (if it did).
+    pub ntp_error: Option<String>,
 }

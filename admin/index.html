@@ -314,6 +314,38 @@
                 <button class="btn btn-secondary mt-2" id="cfg-clock-open" type="button">预览报时器</button>
             </div>
 
+            <!-- 授时 -->
+            <div class="border-t border-border pt-4">
+                <h3 class="text-sm font-semibold text-muted tracking-widest mb-3">授时（国家授时中心 NTP）</h3>
+                <div class="grid grid-cols-2 gap-6">
+                    <div>
+                        <label class="inline-flex items-center gap-2 text-sm">
+                            <input type="checkbox" id="cfg-ntp-enabled" />
+                            <span>启用 NTP 授时</span>
+                        </label>
+                        <label class="form-label mt-3 block">授时服务器（多个用逗号分隔，按顺序尝试）</label>
+                        <input class="form-input w-full" id="cfg-ntp-servers" />
+                        <span class="text-muted text-xs">
+                            默认 <code>ntp.ntsc.ac.cn</code>（中国科学院国家授时中心）；
+                            连不上时依次回退 <code>cn.ntp.org.cn</code>、<code>pool.ntp.org</code>。
+                        </span>
+                    </div>
+                    <div>
+                        <label class="form-label">同步间隔（分钟）</label>
+                        <input class="form-input w-full" id="cfg-ntp-interval" type="number" min="1" max="1440" />
+                        <div class="flex items-center gap-2 mt-3">
+                            <button class="btn btn-secondary" id="cfg-ntp-sync" type="button">立即授时</button>
+                            <span class="text-xs text-muted" id="cfg-ntp-status"></span>
+                        </div>
+                        <span class="text-muted text-xs">引擎启动时也会自动授时一次。</span>
+                    </div>
+                </div>
+                <p class="text-muted text-xs mt-3">
+                    启用后，**报时器与整个播出的时间基准都按授时中心的时间走**。本机系统时间不准
+                    （主板电池没电、被手工改过、域控制器时间错误）也不会影响播出与报时。
+                </p>
+            </div>
+
             <div class="border-t border-border pt-4 flex items-center gap-3">
                 <button class="btn btn-primary" id="cfg-save">保存</button>
                 <button class="btn btn-secondary" id="cfg-test">测试连接</button>

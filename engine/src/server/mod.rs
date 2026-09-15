@@ -121,6 +121,7 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         .route("/api/scheduler/pause", post(schedule_api::pause_scheduler))
         .route("/api/scheduler/next", post(schedule_api::skip_to_next))
         .route("/api/scheduler/reload", post(schedule_api::reload_config))
+        .route("/api/time/sync", post(schedule_api::sync_time))
         .route("/ws", get(ws_push::ws_handler))
         // axum caps buffered request bodies at 2 MiB by default, which silently
         // rejected every media upload (a single video is far bigger). The

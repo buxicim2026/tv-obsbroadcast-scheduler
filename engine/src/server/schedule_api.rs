@@ -91,6 +91,13 @@ fn snapshot_value(cfg: &crate::config::Config, st: &AppStatus) -> Value {
         "target_input": cfg.target_input,
         "bootstrap_token": cfg.bootstrap_token,
         "clock": cfg.clock,
+        "time_sync": cfg.time_sync,
+        "ntp": {
+            "offset_ms": st.ntp_offset_ms,
+            "server": st.ntp_server,
+            "synced_at": st.ntp_synced_at,
+            "error": st.ntp_error,
+        },
         "playlist_size": cfg.playlist.items.len(),
         "bumpers_size": cfg.playlist.bumpers.len(),
     })
@@ -614,6 +621,28 @@ pub async fn reload_config(
         .lock()
         .push_back(crate::ControlCommand::Reload);
     Ok(Json(json!({"ok": true})))
+}
+
+/// Ask the time servers *now* instead of waiting for the next interval — the
+/// button behind "立即授时" in the admin panel.
+pub async fn sync_time(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    let servers = state.config.read().time_sync.servers.clone();
+    match crate::ntp::sync(&servers).await {
+        Ok((server, offset_ms)) => {
+            crate::ntp::apply_offset(&state, &server, offset_ms);
+            Ok(Json(json!({
+                "ok": true,
+                "server": server,
+                "offset_ms": offset_ms,
+            })))
+        }
+        // 502: we reached the internet-facing part and it said no.
+        Err(e) => Err((StatusCode::BAD_GATEWAY, format!("授时失败：{e}"))),
+    }
 }
 
 pub async fn enable_scheduler(

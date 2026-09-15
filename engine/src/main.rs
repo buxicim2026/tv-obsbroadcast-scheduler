@@ -153,6 +153,10 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Keep true time: the schedule and the station clock run off the NTP
+    // offset, so a wrong PC clock can't move them. Syncs once right away.
+    tokio::spawn(tvbs_engine::ntp::run(state.clone()));
+
     // Watch the bridge files the OBS Lua script writes. Doing settings over a
     // file instead of HTTP is what keeps OBS from flashing console windows: the
     // script never has to shell out to curl, and it can read status.json to see

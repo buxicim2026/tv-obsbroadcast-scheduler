@@ -28,6 +28,19 @@ pub struct BootstrapPayload {
     /// Optional station-clock settings (整点 / 半点报时).
     #[serde(default)]
     pub clock: Option<ClockPatch>,
+    /// Optional NTP settings (国家授时中心).
+    #[serde(default)]
+    pub time_sync: Option<TimeSyncPatch>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TimeSyncPatch {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub servers: Option<Vec<String>>,
+    #[serde(default)]
+    pub interval_min: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -122,6 +135,26 @@ pub async fn bootstrap(
             }
             if let Some(v) = c.position {
                 cfg.clock.position = v;
+            }
+        }
+        if let Some(t) = payload.time_sync {
+            if let Some(v) = t.enabled {
+                cfg.time_sync.enabled = v;
+            }
+            if let Some(v) = t.servers {
+                // Drop blank entries so a trailing comma in the admin input
+                // doesn't turn into a server literally called "".
+                let list: Vec<String> = v
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !list.is_empty() {
+                    cfg.time_sync.servers = list;
+                }
+            }
+            if let Some(v) = t.interval_min {
+                cfg.time_sync.interval_min = v.clamp(1, 1440);
             }
         }
     }

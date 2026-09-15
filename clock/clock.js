@@ -43,6 +43,10 @@ const SEGMENTS = {
     '9': 'abcdfg',
 };
 
+/// Correction (ms) from the NTP sync against 国家授时中心. Applied to the
+/// machine clock, so a PC whose time is wrong still strikes the hour on time.
+let ntpOffsetMs = 0;
+
 const slot = document.getElementById('clock-slot');
 const plate = document.getElementById('clock-plate');
 const digits = document.getElementById('clock-digits');
@@ -153,7 +157,7 @@ let lastPaint = '';
 let lastVisible = null;
 
 function tick() {
-    const now = new Date();
+    const now = new Date(Date.now() + ntpOffsetMs);
     if (!cfg.enabled) {
         if (lastVisible !== false) {
             slot.classList.remove('visible');
@@ -179,11 +183,17 @@ function tick() {
 
 /* ------------------------------------------------------------------ boot --- */
 
+function applyNtp(n) {
+    if (!n) return;
+    if (typeof n.offset_ms === 'number') ntpOffsetMs = n.offset_ms;
+}
+
 async function loadConfig() {
     try {
         const r = await fetch('/api/status');
         const s = await r.json();
         if (s.clock) applyConfig(s.clock);
+        applyNtp(s.ntp);
     } catch (_) {}
 }
 
@@ -193,7 +203,9 @@ function connect() {
     ws.addEventListener('message', ev => {
         try {
             const msg = JSON.parse(ev.data);
-            if (msg.kind === 'snapshot' && msg.clock) applyConfig(msg.clock);
+            if (msg.kind !== 'snapshot') return;
+            if (msg.clock) applyConfig(msg.clock);
+            applyNtp(msg.ntp);
         } catch (_) {}
     });
     ws.addEventListener('close', () => setTimeout(connect, 1000));
