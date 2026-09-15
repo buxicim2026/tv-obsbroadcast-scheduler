@@ -77,8 +77,8 @@ jobs:
         run: |
           set -euo pipefail
           if grep -rInE 'cdn\.jsdelivr|cdnjs|unpkg\.com|fonts\.googleapis|fonts\.gstatic' \
-               admin overlay; then
-            echo "::error::admin/overlay must stay offline (no CDN or web fonts)"
+               admin overlay clock; then
+            echo "::error::admin/overlay/clock must stay offline (no CDN or web fonts)"
             exit 1
           fi
           echo "OK: no external asset references"
@@ -87,7 +87,8 @@ jobs:
         run: |
           set -euo pipefail
           for f in admin/style.css admin/app.js admin/timeline.js admin/bumpers.js \
-                   overlay/style.css overlay/overlay.js; do
+                   overlay/style.css overlay/overlay.js \
+                   clock/style.css clock/clock.js; do
             test -f "$f" || { echo "::error::missing $f"; exit 1; }
           done
           echo "OK: all frontend assets present"

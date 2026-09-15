@@ -214,16 +214,28 @@ local function build_payload(settings, apply_enabled, open_admin)
   local token = ensure_token(settings)
   local enabled = (apply_enabled ~= false)
     and obs.obs_data_get_bool(settings, "scheduler_enabled")
+
+  -- Blank fields are written as JSON `null` so the engine skips them. Writing
+  -- "" instead made an empty box in the script properties overwrite whatever
+  -- the operator had saved through the web panel — including the target media
+  -- source, which then came back as "source does not exist" after an OBS restart.
+  local function opt_str(v)
+    if v == nil or v == "" then return "null" end
+    return '"' .. json_escape(v) .. '"'
+  end
+  local port = obs.obs_data_get_int(settings, "ws_port")
+  local port_json = port > 0 and tostring(port) or "null"
+
   return string.format(
-    '{\n  "bootstrap_token": "%s",\n  "host": "%s",\n  "port": %d,\n'
-      .. '  "password": "%s",\n  "tls": %s,\n  "target_input": "%s",\n'
+    '{\n  "bootstrap_token": "%s",\n  "host": %s,\n  "port": %s,\n'
+      .. '  "password": "%s",\n  "tls": %s,\n  "target_input": %s,\n'
       .. '  "enabled": %s,\n  "open_admin": %s,\n  "ts": %d\n}\n',
     json_escape(token),
-    json_escape(obs.obs_data_get_string(settings, "ws_host")),
-    obs.obs_data_get_int(settings, "ws_port"),
+    opt_str(obs.obs_data_get_string(settings, "ws_host")),
+    port_json,
     json_escape(obs.obs_data_get_string(settings, "ws_password")),
     obs.obs_data_get_bool(settings, "ws_tls") and "true" or "false",
-    json_escape(obs.obs_data_get_string(settings, "target_input")),
+    opt_str(obs.obs_data_get_string(settings, "target_input")),
     enabled and "true" or "false",
     open_admin and "true" or "false",
     os.time() * 1000
