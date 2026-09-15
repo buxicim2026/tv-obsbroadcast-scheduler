@@ -4,22 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=960&height=240" />
     <title>tv-obsbroadcast-scheduler · 报时器</title>
-    <!-- Fully offline: system font stack, no CDN. See style.css. -->
+    <!-- Fully offline: no CDN, no webfont. The digits are drawn from CSS
+         segments, so they look the same on every machine. -->
     <link rel="stylesheet" href="/clock/style.css" />
 </head>
 <body class="clock-body">
-    <!-- One wrapper per corner so the source can stay full-canvas and the
-         operator picks the corner from the admin panel, not by hand. -->
-    <div class="clock-slot" id="clock-slot" hidden>
-        <div class="clock-plate" id="clock-plate">
-            <div class="clock-label" id="clock-label">北京时间</div>
-            <div class="clock-time" id="clock-time">--:--:--</div>
+    <!-- Always rendered; visibility is opacity, never `hidden`: an OBS browser
+         source keeps the last painted frame when a page stops drawing, which is
+         why the clock used to freeze on its final second instead of going away. -->
+    <div class="clock-slot" id="clock-slot">
+        <div class="clock-plate pill" id="clock-plate">
+            <div class="clock-digits" id="clock-digits"></div>
         </div>
     </div>
 
-    <div class="clock-off" id="clock-off" hidden>
-        报时器已关闭 —— 在系统设置里打开「整点/半点报时」后此处会自动显示。
-    </div>
+    <div class="clock-off" id="clock-off">报时器已关闭 —— 在系统设置里打开「整点/半点报时」后此处会自动显示。</div>
 
 <script type="module" src="/clock/clock.js"></script>
 </body>

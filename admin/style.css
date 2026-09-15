@@ -750,13 +750,32 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
 
 .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-/* 节目清单：名称可能很长，在单元格里截断显示，完整名称靠 title 悬停查看 */
+/* 节目清单：名称可能很长，在单元格里截断显示，完整名称靠悬停浮窗查看 */
+#playlist-tbody td { white-space: nowrap; }
 .pl-name {
-    max-width: 320px;
+    max-width: 240px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* 悬停浮窗：用 fixed 定位跟随鼠标，所以不会被表格的横向滚动容器裁掉 */
+.pl-tooltip {
+    position: fixed;
+    z-index: 90;
+    max-width: 460px;
+    padding: 8px 11px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+    font-size: 12px;
+    line-height: 1.5;
+    pointer-events: none;
+}
+.pl-tooltip[hidden] { display: none; }
+.pl-tip-name { font-weight: 600; word-break: break-all; }
+.pl-tip-path { color: var(--muted); word-break: break-all; margin-top: 2px; }
 
 /* 节目清单：鼠标拖拽排序 */
 .pl-grip {

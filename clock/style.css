@@ -1,6 +1,10 @@
 /* clock/style.css — station clock (整点 / 半点报时).
-   Transparent background: whatever sits under this browser source stays
-   visible, exactly like a real channel ident sitting over the picture. */
+ *
+ * Transparent page: only the plate and the digits are painted, so it sits over
+ * the picture like a real channel ident. The digits are drawn as CSS segments
+ * (no webfont, no image), which keeps the overlay pixel-identical on every
+ * machine and works with the fully-offline requirement.
+ */
 
 html, body {
     margin: 0;
@@ -12,18 +16,22 @@ html, body {
 .clock-body {
     width: 100%;
     height: 100%;
-    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif;
     color: #fff;
     -webkit-font-smoothing: antialiased;
 }
 
-/* Padding keeps the plate off the exact edge of the canvas. */
+/* Padding keeps the plate off the very edge of the canvas. */
 .clock-slot {
     position: fixed;
-    inset: 12px;
+    inset: 10px;
     display: flex;
     pointer-events: none;
+    /* Never `display:none`: an OBS browser source keeps the last painted frame
+       when a page stops drawing, which made the clock freeze on its last second. */
+    opacity: 0;
+    transition: opacity 180ms linear;
 }
+.clock-slot.visible { opacity: 1; }
 
 .clock-slot.top_left      { align-items: flex-start; justify-content: flex-start; }
 .clock-slot.top_center    { align-items: flex-start; justify-content: center; }
@@ -32,41 +40,125 @@ html, body {
 .clock-slot.bottom_center { align-items: flex-end;   justify-content: center; }
 .clock-slot.bottom_right  { align-items: flex-end;   justify-content: flex-end; }
 
+/* ---------------------------------------------------------------- plate --- */
+
 .clock-plate {
-    padding: 14px 26px 16px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 14px;
-    background: rgba(8, 10, 14, 0.45);
-    text-align: center;
-    line-height: 1.05;
-    /* Kinemaster-grade: no layout jitter while the seconds change. */
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: 'tnum' 1;
-    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35);
+    position: relative;
+    font-size: 72px;              /* overridden by the admin setting */
+    padding: 0.42em 0.95em;
+    line-height: 1;
+    /* The background lives on ::before so the opacity slider can fade the plate
+       without touching the digits. */
 }
 
-.clock-label {
-    font-size: 20px;
-    letter-spacing: 0.42em;
-    text-indent: 0.42em;
-    opacity: 0.72;
-    margin-bottom: 6px;
+.clock-plate::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    opacity: var(--plate-opacity, 0.45);
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.20) 0%,
+        rgba(255, 255, 255, 0.05) 42%,
+        rgba(0, 0, 0, 0.14) 100%
+    ), rgba(58, 62, 70, 1);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    box-shadow:
+        inset 0 2px 6px rgba(255, 255, 255, 0.22),
+        inset 0 -8px 18px rgba(0, 0, 0, 0.30),
+        0 10px 30px rgba(0, 0, 0, 0.38);
+    transition: opacity 180ms linear;
 }
 
-.clock-time {
-    font-size: 72px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+.clock-plate.pill    { border-radius: 50% / 50%; }
+.clock-plate.rounded { border-radius: 0.28em; }
+.clock-plate.rect    { border-radius: 0; }
+/* "none" keeps the digits and drops the plate entirely. */
+.clock-plate.none::before { opacity: 0; }
+
+/* --------------------------------------------------------------- digits --- */
+
+.clock-digits {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.06em;
+    filter: drop-shadow(0 0 0.045em rgba(255, 255, 255, 0.55));
 }
+
+/* One digit: 0.58em wide, 1em tall — the classic seven-segment proportions. */
+.seg-digit {
+    position: relative;
+    width: 0.58em;
+    height: 1em;
+    flex: 0 0 auto;
+}
+
+.seg {
+    position: absolute;
+    display: block;
+    background: #fff;
+    /* Unlit segments stay faintly visible, the way a real LED panel looks. */
+    opacity: 0.06;
+    transition: opacity 60ms linear;
+}
+.seg.on { opacity: 1; }
+
+/* Horizontal bars: clipped to a hexagon so both ends are chamfered. */
+.seg.a, .seg.d, .seg.g {
+    left: 0.075em;
+    width: 0.43em;
+    height: 0.125em;
+    clip-path: polygon(14% 0, 86% 0, 100% 50%, 86% 100%, 14% 100%, 0 50%);
+}
+.seg.a { top: 0.015em; }
+.seg.g { top: 0.44em; }
+.seg.d { bottom: 0.015em; }
+
+/* Vertical bars. */
+.seg.f, .seg.b, .seg.e, .seg.c {
+    width: 0.125em;
+    height: 0.39em;
+    clip-path: polygon(0 14%, 50% 0, 100% 14%, 100% 86%, 50% 100%, 0 86%);
+}
+.seg.f { left: 0.015em; top: 0.075em; }
+.seg.b { right: 0.015em; top: 0.075em; }
+.seg.e { left: 0.015em; bottom: 0.075em; }
+.seg.c { right: 0.015em; bottom: 0.075em; }
+
+/* Colon: two square dots. */
+.seg-colon {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.2em;
+    height: 1em;
+    margin: 0 0.06em;
+    flex: 0 0 auto;
+    opacity: 0.92;
+}
+.seg-colon i {
+    display: block;
+    width: 0.115em;
+    height: 0.115em;
+    background: #fff;
+    border-radius: 0.015em;
+}
+
+/* ---------------------------------------------------------------- notice --- */
 
 .clock-off {
     position: fixed;
-    left: 16px;
-    top: 16px;
+    left: 14px;
+    top: 14px;
     font-size: 13px;
-    opacity: 0.55;
+    font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+    opacity: 0.5;
     background: rgba(0, 0, 0, 0.5);
     padding: 6px 10px;
     border-radius: 8px;
+    color: #fff;
 }
+.clock-off[hidden] { display: none; }

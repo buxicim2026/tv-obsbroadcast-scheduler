@@ -175,7 +175,7 @@
                         <tr class="text-left text-muted text-xs uppercase tracking-widest">
                             <th class="py-2 pr-2" style="width:36px"></th>
                             <th class="py-2 pr-2" style="width:28px"></th>
-                            <th class="py-2 pr-2">名称（悬停看全名）</th>
+                            <th class="py-2 pr-2" style="max-width:240px">名称（悬停看全名）</th>
                             <th class="py-2 pr-2">节目类型</th>
                             <th class="py-2 pr-2">时长</th>
                             <th class="py-2 pr-2">播出时间</th>
@@ -268,16 +268,32 @@
                             <input type="checkbox" id="cfg-clock-enabled" />
                             <span>启用整点 / 半点报时</span>
                         </label>
-                        <label class="form-label mt-3 block">字体（CSS font-family）</label>
+                        <label class="form-label mt-3 block">字体（系统已安装字体）</label>
+                        <div class="flex items-center gap-2">
+                            <select class="form-input w-full" id="cfg-clock-font-list"></select>
+                            <button class="btn btn-secondary" id="cfg-clock-font-scan" type="button">读取字体</button>
+                        </div>
+                        <span class="text-muted text-xs">点「读取字体」会向浏览器申请本机字体列表；读不到时下面手动填写也可以。</span>
+                        <label class="form-label mt-2 block">字体（CSS font-family，可手动填写）</label>
                         <input class="form-input w-full" id="cfg-clock-font" />
                         <label class="form-label mt-3 block">字号（像素）</label>
                         <input class="form-input w-full" id="cfg-clock-size" type="number" min="12" max="400" />
                     </div>
                     <div>
-                        <label class="form-label">背景透明度（%，0 = 不要底板）</label>
+                        <label class="form-label">底板样式</label>
+                        <select class="form-input w-full" id="cfg-clock-plate">
+                            <option value="pill">胶囊 / 椭圆（电视台常见）</option>
+                            <option value="rounded">圆角矩形</option>
+                            <option value="rect">直角矩形</option>
+                            <option value="none">不要底板</option>
+                        </select>
+                        <label class="form-label mt-3 block">背景透明度（%，0 = 完全透明）</label>
                         <input class="form-input w-full" id="cfg-clock-bg" type="number" min="0" max="100" />
                         <label class="form-label mt-3 block">显示时长（秒）</label>
                         <input class="form-input w-full" id="cfg-clock-duration" type="number" min="5" max="900" />
+                        <label class="form-label mt-3 block">提前多少秒开始显示</label>
+                        <input class="form-input w-full" id="cfg-clock-lead" type="number" min="0" max="600" />
+                        <span class="text-muted text-xs">默认提前 30 秒、显示 60 秒，即 11:59:30 → 12:00:30。</span>
                         <label class="form-label mt-3 block">显示位置</label>
                         <select class="form-input w-full" id="cfg-clock-position">
                             <option value="top_right">右上角</option>
@@ -292,7 +308,8 @@
                 <p class="text-muted text-xs mt-3">
                     用法：在 OBS 场景里新增一个「浏览器源」，地址填
                     <code>http://127.0.0.1:8789/clock</code>（建议宽高 960×240）。页面背景透明，
-                    只在整点与半点之后的设定时长内浮出，显示到秒，到点自动隐去，不影响下面的画面。
+                    数字为七段数码管样式，在整点与半点前后浮出（默认 11:59:30 → 12:00:30），
+                    显示到秒，时间一到自动隐去，不影响下面的画面。
                 </p>
                 <button class="btn btn-secondary mt-2" id="cfg-clock-open" type="button">预览报时器</button>
             </div>
@@ -306,6 +323,9 @@
     </section>
 
 </main>
+
+<!-- 节目名过长时的悬停浮窗（fixed 定位，不会被表格滚动容器裁剪） -->
+<div id="pl-tooltip" class="pl-tooltip" hidden></div>
 
 <footer class="px-6 py-4 text-muted text-xs flex items-center justify-center gap-3 flex-wrap">
     <span>v0.1.0 · OBS Broadcast Scheduler</span>

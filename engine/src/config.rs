@@ -48,6 +48,15 @@ pub struct ClockConfig {
     /// How long it stays on screen, in seconds (60 = the classic one minute).
     #[serde(default = "default_clock_duration_s")]
     pub duration_s: u32,
+    /// How long *before* the hour / half-hour it appears. With the default 30
+    /// the display runs 11:59:30 → 12:00:30, i.e. it counts the channel into
+    /// the news instead of starting only once the hour has already struck.
+    #[serde(default = "default_clock_lead_s")]
+    pub lead_s: u32,
+    /// Plate shape behind the digits:
+    /// `pill` (the classic oval, default), `rounded`, `rect`, or `none`.
+    #[serde(default = "default_clock_plate_style")]
+    pub plate_style: String,
     /// Corner it sits in: top_left / top_right / bottom_left / bottom_right /
     /// top_center / bottom_center.
     #[serde(default = "default_clock_position")]
@@ -184,6 +193,12 @@ fn default_clock_bg_opacity() -> u8 {
 fn default_clock_duration_s() -> u32 {
     60
 }
+fn default_clock_lead_s() -> u32 {
+    30
+}
+fn default_clock_plate_style() -> String {
+    "pill".to_string()
+}
 fn default_clock_position() -> String {
     "top_right".to_string()
 }
@@ -227,6 +242,8 @@ impl Default for ClockConfig {
             font_size_px: default_clock_font_size_px(),
             bg_opacity_percent: default_clock_bg_opacity(),
             duration_s: default_clock_duration_s(),
+            lead_s: default_clock_lead_s(),
+            plate_style: default_clock_plate_style(),
             position: default_clock_position(),
         }
     }

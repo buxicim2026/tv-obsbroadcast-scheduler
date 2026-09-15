@@ -75,6 +75,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // aborted the whole boot and left every button looking dead.
     const steps = [
         ['页签切换', setupTabs],
+        ['名称浮窗', setupPlaylistTooltip],
         ['主控台按钮', setupDashboardActions],
         ['节目表', setupPlaylistAdd],
         ['设置', setupSettings],
@@ -148,6 +149,15 @@ async function refreshAll() {
         await verifyPlaylist();
         renderPlaylistRows();
         renderBumpers(bumpersCache);
+        // Once the channel is really on air, a leftover "target source does not
+        // exist" complaint is stale by definition — clear it instead of leaving
+        // a fixed configuration looking broken.
+        const schNow = status.scheduler || status.status || {};
+        const statusEl = document.getElementById('playlist-status');
+        if (statusEl && schNow.scheduler_running
+            && /目标媒体源|不是媒体源/.test(statusEl.textContent || '')) {
+            statusEl.textContent = '';
+        }
         if (!document.querySelector('[data-tab="timeline"]').classList.contains('hidden')) {
             renderTimeline(timelineItems());
         }
@@ -509,6 +519,9 @@ async function toggleArmed() {
                 from_now: true,
             });
             log('已开始自动播出（节目单已按当前时刻对齐）');
+            // Clear any stale pre-flight complaint: it used to stay on the
+            // playlist page forever, so a fixed configuration still looked broken.
+            setPlaylistStatus('已开始自动播出，节目单已按当前时刻对齐', 'ok');
         }
         await refreshAll();
         // Pull once more a moment later: the scheduler needs a tick to flip
@@ -952,7 +965,17 @@ async function uploadMediaFile(file, onProgress) {
 /// Pre-flight check before arming: the target must exist in OBS and be a media
 /// source, otherwise nothing will ever play and the reason is invisible.
 async function checkTargetInput() {
-    const target = (lastSnapshot && lastSnapshot.target_input) || '';
+    // Read the target from a *fresh* status call, not the local snapshot: the
+    // snapshot is replaced by every /ws frame, so after saving a new target
+    // source in Settings the check could still be looking at the old name — and
+    // report "source does not exist" even though everything is configured
+    // correctly.
+    let target = (lastSnapshot && lastSnapshot.target_input) || '';
+    try {
+        const s = await fetch(API.status).then(r => r.json());
+        lastSnapshot = { ...(lastSnapshot || {}), ...s };
+        target = s.target_input || target;
+    } catch (_) {}
     if (!target) {
         return { ok: false, message: '还没有设置目标媒体源：到「设置」页从下拉里选择你的媒体源并保存' };
     }
@@ -960,7 +983,10 @@ async function checkTargetInput() {
         const j = await fetch('/api/obs/inputs').then(r => r.json());
         const list = j.inputs || [];
         if (!list.length) return { ok: true, message: '' }; // OBS 未连接，交给其它提示
-        const hit = list.find(i => i.inputName === target);
+        // OBS source names tolerate stray spaces and case differ, so compare
+        // loosely — an exact match made "main_media " look like a missing source.
+        const want = target.trim().toLowerCase();
+        const hit = list.find(i => String(i.inputName || '').trim().toLowerCase() === want);
         if (!hit) {
             return {
                 ok: false,
@@ -1114,6 +1140,52 @@ function programState(p, sch) {
     return ['等待中', 'text-muted'];
 }
 
+/// 节目名单行会被反复重建，所以浮窗用事件委托挂在 tbody 上（只绑一次）。
+/// 用 fixed 定位跟随鼠标：表格外面是 overflow-x-auto，普通绝对定位会被裁掉。
+function setupPlaylistTooltip() {
+    const tip = document.getElementById('pl-tooltip');
+    const tbody = document.getElementById('playlist-tbody');
+    if (!tip || !tbody || tbody.dataset.tipBound === '1') return;
+    tbody.dataset.tipBound = '1';
+
+    const place = (e) => {
+        const pad = 14;
+        const r = tip.getBoundingClientRect();
+        let x = e.clientX + pad;
+        let y = e.clientY + pad;
+        if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - pad;
+        if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - pad;
+        tip.style.left = `${Math.max(8, x)}px`;
+        tip.style.top = `${Math.max(8, y)}px`;
+    };
+
+    tbody.addEventListener('mouseover', (e) => {
+        const cell = e.target.closest('td.pl-name');
+        if (!cell) return;
+        tip.innerHTML = '';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'pl-tip-name';
+        nameEl.textContent = cell.dataset.full || cell.textContent || '';
+        tip.appendChild(nameEl);
+        const path = cell.dataset.path || '';
+        if (path) {
+            const pathEl = document.createElement('div');
+            pathEl.className = 'pl-tip-path';
+            pathEl.textContent = path;
+            tip.appendChild(pathEl);
+        }
+        tip.hidden = false;
+        place(e);
+    });
+    tbody.addEventListener('mousemove', (e) => {
+        if (!tip.hidden) place(e);
+    });
+    tbody.addEventListener('mouseout', (e) => {
+        if (e.target.closest('td.pl-name')) tip.hidden = true;
+    });
+    window.addEventListener('scroll', () => { tip.hidden = true; }, true);
+}
+
 function renderPlaylistRows() {
     const tbody = document.getElementById('playlist-tbody');
     tbody.innerHTML = '';
@@ -1181,7 +1253,8 @@ function renderPlaylistRows() {
             <td class="py-2 pr-2 pl-grip"
                 title="${locked ? '该节目已开始播出，不能调整顺序' : '按住这里拖动，即可调整播出顺序'}">${locked ? '' : '⠿'}</td>
             <td class="py-2 pr-2 pl-name"
-                title="${escapeHtml(p.name)}&#10;${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>
+                data-full="${escapeHtml(p.name)}"
+                data-path="${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>
             <td class="py-2 pr-2">
                 <select class="form-input row-kind" data-id="${p.id}" style="min-width:108px">
                     ${PROGRAM_KINDS.map(([v, label]) =>
@@ -1297,6 +1370,90 @@ function renderPlaylistRows() {
 /* Settings                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------ 报时器字体选择 --- */
+
+// 常见字体回退清单。浏览器只有在用户授权后才能枚举系统字体（Chromium 的
+// Local Font Access API），所以在读不到时这份列表仍然让用户能选到常见中文字体。
+const CLOCK_FONT_FALLBACK = [
+    ['Microsoft YaHei', '微软雅黑'],
+    ['Microsoft YaHei UI', '微软雅黑 UI'],
+    ['SimHei', '中易黑体'],
+    ['SimSun', '中易宋体'],
+    ['KaiTi', '楷体'],
+    ['FangSong', '仿宋'],
+    ['DengXian', '等线'],
+    ['PingFang SC', '苹方（macOS）'],
+    ['Noto Sans CJK SC', 'Noto Sans CJK'],
+    ['Source Han Sans SC', '思源黑体'],
+    ['DSEG7 Classic', 'DSEG7 数码管字体（若已安装）'],
+    ['Arial', 'Arial'],
+    ['Impact', 'Impact'],
+    ['Consolas', 'Consolas'],
+    ['Courier New', 'Courier New'],
+];
+
+/// 下拉里选中某个字体名后写进输入框的 CSS 值（带中英文回退，避免缺字）。
+function fontCssValue(name) {
+    return `'${name}', 'Microsoft YaHei', 'PingFang SC', sans-serif`;
+}
+
+function fillClockFontList(fonts) {
+    const sel = document.getElementById('cfg-clock-font-list');
+    if (!sel) return;
+    const previous = sel.value;
+    sel.innerHTML = '<option value="">— 从列表选择 —</option>';
+    const seen = new Set();
+    for (const entry of fonts) {
+        const name = entry[0];
+        const label = entry[1];
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        const o = document.createElement('option');
+        o.value = name;
+        o.textContent = label ? `${label} · ${name}` : name;
+        sel.appendChild(o);
+    }
+    if (previous) sel.value = previous;
+}
+
+/// 尝试读取本机已安装字体。被拒绝（或浏览器不支持）就退回内置清单。
+async function scanClockFonts() {
+    if (typeof window.queryLocalFonts !== 'function') {
+        log('此浏览器不允许读取系统字体列表，请手动填写字体名（内置列表里也有常见字体）');
+        return;
+    }
+    try {
+        const fonts = await window.queryLocalFonts();
+        const names = new Set();
+        for (const f of fonts) {
+            if (f && f.family) names.add(f.family);
+        }
+        const arr = Array.from(names).sort().map(n => [n, '']);
+        if (!arr.length) {
+            log('没有读到任何系统字体（可能被拒绝授权）');
+            return;
+        }
+        fillClockFontList(arr);
+        log(`已读取 ${arr.length} 个系统字体，可从下拉中选择`);
+    } catch (e) {
+        log(`读取系统字体被拒绝：${(e && e.message) || e}`);
+    }
+}
+
+function setupClockFontPicker() {
+    fillClockFontList(CLOCK_FONT_FALLBACK);
+    const sel = document.getElementById('cfg-clock-font-list');
+    if (sel) {
+        sel.addEventListener('change', () => {
+            if (!sel.value) return;
+            const input = document.getElementById('cfg-clock-font');
+            if (input) input.value = fontCssValue(sel.value);
+        });
+    }
+    const scan = document.getElementById('cfg-clock-font-scan');
+    if (scan) scan.addEventListener('click', scanClockFonts);
+}
+
 function setupSettings() {
     document.getElementById('cfg-save').addEventListener('click', saveCfg);
     document.getElementById('cfg-test').addEventListener('click', testCfg);
@@ -1306,6 +1463,7 @@ function setupSettings() {
     if (clockPreview) {
         clockPreview.addEventListener('click', () => window.open('/clock', '_blank'));
     }
+    setupClockFontPicker();
     loadObsInputs();
 }
 
@@ -1394,7 +1552,17 @@ function renderSettingsForm() {
     setVal('cfg-clock-size', ck.font_size_px != null ? ck.font_size_px : 72);
     setVal('cfg-clock-bg', ck.bg_opacity_percent != null ? ck.bg_opacity_percent : 45);
     setVal('cfg-clock-duration', ck.duration_s != null ? ck.duration_s : 60);
+    setVal('cfg-clock-lead', ck.lead_s != null ? ck.lead_s : 30);
+    setVal('cfg-clock-plate', ck.plate_style || 'pill');
     setVal('cfg-clock-position', ck.position || 'top_right');
+    // 反查字体下拉：当前值正好是列表里某项生成的 CSS 时才回选，否则留空。
+    const fontSel = document.getElementById('cfg-clock-font-list');
+    if (fontSel && (!active || active.id !== 'cfg-clock-font-list')) {
+        const current = ck.font_family || '';
+        const hit = Array.from(fontSel.options)
+            .find(o => o.value && fontCssValue(o.value) === current);
+        fontSel.value = hit ? hit.value : '';
+    }
 }
 
 async function saveCfg() {
@@ -1417,6 +1585,8 @@ async function saveCfg() {
             font_size_px: parseInt(document.getElementById('cfg-clock-size').value, 10) || 72,
             bg_opacity_percent: Math.max(0, parseInt(document.getElementById('cfg-clock-bg').value, 10) || 0),
             duration_s: parseInt(document.getElementById('cfg-clock-duration').value, 10) || 60,
+            lead_s: Math.max(0, parseInt(document.getElementById('cfg-clock-lead').value, 10) || 0),
+            plate_style: document.getElementById('cfg-clock-plate').value,
             position: document.getElementById('cfg-clock-position').value,
         },
     };

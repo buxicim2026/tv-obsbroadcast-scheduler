@@ -43,6 +43,10 @@ pub struct ClockPatch {
     #[serde(default)]
     pub duration_s: Option<u32>,
     #[serde(default)]
+    pub lead_s: Option<u32>,
+    #[serde(default)]
+    pub plate_style: Option<String>,
+    #[serde(default)]
     pub position: Option<String>,
 }
 
@@ -109,6 +113,12 @@ pub async fn bootstrap(
             }
             if let Some(v) = c.duration_s {
                 cfg.clock.duration_s = v.clamp(5, 900);
+            }
+            if let Some(v) = c.lead_s {
+                cfg.clock.lead_s = v.min(600);
+            }
+            if let Some(v) = c.plate_style {
+                cfg.clock.plate_style = v;
             }
             if let Some(v) = c.position {
                 cfg.clock.position = v;

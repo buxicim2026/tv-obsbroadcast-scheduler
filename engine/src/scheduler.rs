@@ -41,6 +41,11 @@ const SWITCH_SETTLE_MS: u64 = 300;
 /// Watchdog throttle: check what OBS is actually doing about once a second.
 static LAST_WATCHDOG_MS: AtomicI64 = AtomicI64::new(0);
 
+/// How long to wait for OBS to finish opening the new file before starting it
+/// anyway, and how often to ask.
+const SWITCH_READY_TIMEOUT_MS: u64 = 1_500;
+const SWITCH_POLL_MS: u64 = 100;
+
 /// Throttle for the "program vanished from the playlist" warning: without it
 /// the scheduler emitted ~20 identical warnings per second forever.
 static LAST_MISSING_WARN: AtomicI64 = AtomicI64::new(0);
@@ -421,11 +426,48 @@ impl Scheduler {
 
         match machine {
             SchedulerState::Idle => {
-                // Find the next program; if we're inside one already (rare
-                // path: state was reset by a crash but the file is on air),
-                // jump into Playing immediately.
+                // Either the next programme hasn't started yet (arm for it), or
+                // we are already inside one's window — which happens whenever
+                // the operator arms mid-schedule, or the engine starts up while
+                // a row is due.
                 if let Some(p) = crate::playlist::current_program(cfg, now_ms) {
-                    self.begin_playing(state, cfg, p, now_ms, machine).await;
+                    // Take the programme over *for real*: this branch used to
+                    // only flip the state machine to Playing and never talk to
+                    // OBS, so arming mid-programme left the source showing
+                    // whatever it had (usually black) while the UI claimed the
+                    // row was on air — or the row looked "skipped" because it
+                    // ended before anything ever played.
+                    match self.cut_to(cfg, p).await {
+                        Ok(false) => {
+                            let end = crate::playlist::end_at_ms(p);
+                            self.transition_to_playing(
+                                state,
+                                &p.id,
+                                &p.name,
+                                end.saturating_sub(now_ms),
+                                now_ms,
+                                end,
+                                machine,
+                            );
+                            self.spawn_playback_confirm(state, p);
+                        }
+                        Ok(true) => {
+                            // Missing file + SkipToNext: arm for the row after.
+                            warn!("skipping missing program {} ({})", p.name, p.file_path);
+                            match program_after(cfg, &p.id) {
+                                Some(next) => {
+                                    let fire_at = next
+                                        .start_at_ms
+                                        .saturating_sub(cfg.scheduler.lead_in_ms as i64);
+                                    self.transition_to_armed(state, next, fire_at, machine);
+                                }
+                                None => self.become_idle(state, machine),
+                            }
+                        }
+                        // No OBS link yet (or the RPC failed): stay Idle and
+                        // retry on the next tick rather than freezing in Error.
+                        Err(e) => debug!("take-over cut not possible yet: {e}"),
+                    }
                 } else if let Some(next) = crate::playlist::next_program(cfg, now_ms) {
                     let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
                     self.transition_to_armed(state, next, fire_at, machine);
@@ -1141,11 +1183,41 @@ impl Scheduler {
                 true,
             )
             .await?;
-        // Give OBS a moment to actually open the new file. RESTART sent in the
-        // same instant as the `local_file` change was landing on a source that
-        // was mid-swap, and the action was dropped — the channel stayed black
-        // (a media source holds one file, so nothing else would ever play).
-        tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
+        // Wait until OBS has actually opened the file, then start it. A fixed
+        // 300ms sleep was guesswork: on a slow disk or a long-GOP file RESTART
+        // landed while the decoder was still opening — which showed up as a
+        // stutter right at the start of the next programme — while on a fast
+        // one it just wasted the interval with the source black.
+        let deadline = std::time::Instant::now() + Duration::from_millis(SWITCH_READY_TIMEOUT_MS);
+        loop {
+            match client.get_media_input_status(&self.target_input).await {
+                Ok(s) => {
+                    let state = s.media_state.to_ascii_uppercase();
+                    // `mediaDuration > 0` proves the decoder parsed the file;
+                    // the state check keeps us from being fooled by the
+                    // duration OBS still reports for the *previous* clip.
+                    let decoded = s.media_duration > 0.0;
+                    let live = state.contains("OPENING")
+                        || state.contains("BUFFERING")
+                        || state.contains("PLAYING")
+                        || state.contains("PAUSED");
+                    if decoded && live {
+                        break;
+                    }
+                }
+                // Status query failed (old OBS, or the source vanished): don't
+                // spin, just start it and let the watchdog sort it out.
+                Err(_) => break,
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!(
+                    "'{}' was still not ready after {}ms; starting it anyway",
+                    p.name, SWITCH_READY_TIMEOUT_MS
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(SWITCH_POLL_MS)).await;
+        }
         client
             .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
             .await?;
