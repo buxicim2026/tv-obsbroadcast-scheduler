@@ -28,6 +28,13 @@ pub struct Config {
     /// Keeping true time via NTP (国家授时中心).
     #[serde(default)]
     pub time_sync: TimeSyncConfig,
+    /// True once the OBS script has handed over credentials. From then on the
+    /// web panel is the source of truth: the script may only take over again
+    /// when the operator explicitly asks (Test Connection). Without this, every
+    /// OBS-side settings save rewrote the target source and switched autoplay
+    /// back off.
+    #[serde(default)]
+    pub bootstrapped: bool,
 }
 
 /// Where the engine gets real time from. A broadcast clock cannot trust the

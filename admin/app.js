@@ -4,7 +4,6 @@
 // switched via the top nav. A live WebSocket keeps the dashboard in sync
 // with the engine; mutated settings go back via REST.
 
-import { initTimeline, renderTimeline } from '/admin/timeline.js';
 import { renderBumpers } from '/admin/bumpers.js';
 
 const API = {
@@ -82,7 +81,6 @@ window.addEventListener('DOMContentLoaded', () => {
         ['主控台按钮', setupDashboardActions],
         ['节目表', setupPlaylistAdd],
         ['设置', setupSettings],
-        ['时间轴', initTimeline],
     ];
     for (const [label, fn] of steps) {
         try {
@@ -119,7 +117,6 @@ function setupTabs() {
                     if (!panel.classList.contains('tab-panel')) return;
                     panel.classList.toggle('hidden', panel.dataset.tab !== tab);
                 });
-            if (tab === 'timeline') renderTimeline(timelineItems());
         });
     });
 
@@ -160,9 +157,6 @@ async function refreshAll() {
         if (statusEl && schNow.scheduler_running
             && /目标媒体源|不是媒体源/.test(statusEl.textContent || '')) {
             statusEl.textContent = '';
-        }
-        if (!document.querySelector('[data-tab="timeline"]').classList.contains('hidden')) {
-            renderTimeline(timelineItems());
         }
     } catch (e) {
         log(`refreshAll failed: ${e}`);
@@ -492,8 +486,10 @@ function setupDashboardActions() {
             if (l) l.innerHTML = '';
         });
     }
+    // The 24h timeline tab was dropped; the bumper list lives on the console, so
+    // "manage" now leads to the playlist where the schedule is edited.
     document.getElementById('btn-manage-bumpers').addEventListener('click', () => {
-        document.querySelector('.nav-tab[data-tab="timeline"]')?.click();
+        document.querySelector('.nav-tab[data-tab="playlist"]')?.click();
     });
     // Support button: the sponsor link is not decided yet, so acknowledge the
     // click in place instead of navigating nowhere.
@@ -1806,6 +1802,11 @@ async function saveCfg() {
         },
     };
     const status = document.getElementById('cfg-status');
+    if (!document.getElementById('cfg-target-input').value) {
+        // Not a hard error — the operator may be fixing credentials while OBS is
+        // down — but an empty target is the classic "nothing ever plays".
+        log('提示：受控媒体源还没选，播出时不会有画面（到设置页从下拉里选一个媒体源）');
+    }
     status.textContent = '保存中…';
     try {
         const res = await fetch('/api/bootstrap', {

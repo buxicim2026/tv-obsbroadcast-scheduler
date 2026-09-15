@@ -52,6 +52,11 @@ pub struct BridgePayload {
     /// the script would have to shell out just to launch a URL.
     #[serde(default)]
     pub open_admin: Option<bool>,
+    /// Set when the operator pressed Test Connection: re-take the credentials
+    /// from the script even though the panel has been in charge since the
+    /// bootstrap.
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 /// What we write back, so the script can prove we're alive and report the OBS
@@ -184,31 +189,47 @@ pub async fn run(state: AppState, http_port: u16) {
 }
 
 fn apply(state: &AppState, p: &BridgePayload, http_port: u16) {
-    {
+    // Only take credentials (and the arm flag) from the script while the engine
+    // has none yet — or when the operator explicitly asked for it by pressing
+    // Test Connection (`force`). Otherwise the OBS script properties would
+    // silently overwrite whatever was configured in the web panel: that is how
+    // the target source went blank again after an OBS restart, and how autoplay
+    // kept getting switched back off.
+    let took_credentials = {
         let mut cfg = state.config.write();
-        if let Some(h) = p.host.as_ref() {
-            cfg.obs_ws.host = h.clone();
-        }
-        if let Some(v) = p.port {
-            cfg.obs_ws.port = v;
-        }
-        if let Some(v) = p.password.as_ref() {
-            cfg.obs_ws.password = Some(v.clone());
-        }
-        if let Some(v) = p.tls {
-            cfg.obs_ws.tls = v;
-        }
-        if let Some(v) = p.target_input.as_ref() {
-            cfg.target_input = v.clone();
-        }
-        if let Some(v) = p.enabled {
-            cfg.scheduler.enabled = v;
-        }
-        if let Some(v) = p.bootstrap_token.as_ref() {
-            if !v.is_empty() {
-                cfg.bootstrap_token = Some(v.clone());
+        if cfg.bootstrapped && p.force != Some(true) {
+            false
+        } else {
+            if let Some(h) = p.host.as_ref() {
+                cfg.obs_ws.host = h.clone();
             }
+            if let Some(v) = p.port {
+                cfg.obs_ws.port = v;
+            }
+            if let Some(v) = p.password.as_ref() {
+                cfg.obs_ws.password = Some(v.clone());
+            }
+            if let Some(v) = p.tls {
+                cfg.obs_ws.tls = v;
+            }
+            if let Some(v) = p.target_input.as_ref() {
+                cfg.target_input = v.clone();
+            }
+            if let Some(v) = p.enabled {
+                cfg.scheduler.enabled = v;
+            }
+            if let Some(v) = p.bootstrap_token.as_ref() {
+                if !v.is_empty() {
+                    cfg.bootstrap_token = Some(v.clone());
+                }
+            }
+            cfg.bootstrapped = true;
+            true
         }
+    };
+
+    if !took_credentials {
+        debug!("bridge: ignoring the script's credentials — the panel is the source of truth now");
     }
 
     if p.open_admin == Some(true) {
@@ -228,12 +249,16 @@ fn apply(state: &AppState, p: &BridgePayload, http_port: u16) {
         }
     }
 
-    let cfg = state.config.read().clone();
-    let path = crate::config_path();
-    if let Err(e) = cfg.save_atomic(&path) {
-        warn!("bridge: persist config failed: {e:#}");
-    } else {
-        info!("bridge: applied settings from the OBS script");
+    // Nothing of ours changed: don't rewrite config.json (it would also clobber
+    // settings the operator just saved in the panel).
+    if took_credentials {
+        let cfg = state.config.read().clone();
+        let path = crate::config_path();
+        if let Err(e) = cfg.save_atomic(&path) {
+            warn!("bridge: persist config failed: {e:#}");
+        } else {
+            info!("bridge: applied settings from the OBS script");
+        }
     }
     let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
     let _ = state.notify.send(crate::NotifyKind::SchedulerStateChanged);

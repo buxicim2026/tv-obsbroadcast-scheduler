@@ -22,7 +22,6 @@
     <nav class="flex items-center gap-1" id="top-nav">
         <button data-tab="dashboard" class="nav-tab nav-tab-active">主控台</button>
         <button data-tab="playlist" class="nav-tab">节目表</button>
-        <button data-tab="timeline" class="nav-tab">时间轴</button>
         <button data-tab="settings" class="nav-tab">设置</button>
     </nav>
 </header>
@@ -198,31 +197,7 @@
         </div>
     </section>
 
-    <!-- 屏 3 — 时间轴可视化 -->
-    <section data-tab="timeline" class="tab-panel hidden">
-        <div class="bg-surface border border-border rounded-2xl p-6">
-            <div class="flex items-center justify-between mb-3">
-                <h2 class="text-lg font-bold">24h 时间轴</h2>
-                <div class="flex items-center gap-2 text-xs">
-                    <span class="legend legend-primary"></span><span class="text-muted mr-3">Primary</span>
-                    <span class="legend legend-interstitial"></span><span class="text-muted mr-3">Interstitial</span>
-                    <span class="legend legend-standalone"></span><span class="text-muted mr-3">Standalone</span>
-                    <span class="legend legend-bumper"></span><span class="text-muted mr-3">Bumper</span>
-                </div>
-            </div>
-            <div class="relative h-44 bg-bg border border-border rounded-lg overflow-hidden" id="timeline-canvas">
-                <div class="absolute top-0 left-0 h-full border-l-2 border-red-500" id="timeline-now"></div>
-            </div>
-            <div class="grid grid-cols-24 gap-0 mt-2" id="timeline-hours"></div>
-        </div>
-        <div class="grid grid-cols-3 gap-4 mt-4">
-            <button class="btn btn-secondary" id="btn-tl-prev-day">← 前一天</button>
-            <button class="btn btn-primary" id="btn-tl-today">跳到今天</button>
-            <button class="btn btn-secondary" id="btn-tl-next-day">后一天 →</button>
-        </div>
-    </section>
-
-    <!-- 屏 4 — 设置 -->
+    <!-- 屏 3 — 设置 -->
     <section data-tab="settings" class="tab-panel hidden">
         <div class="bg-surface border border-border rounded-2xl p-6 space-y-6">
             <h2 class="text-lg font-bold">系统设置</h2>

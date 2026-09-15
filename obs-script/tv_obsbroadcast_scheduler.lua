@@ -210,7 +210,7 @@ end
 -- apply_enabled=false：只送凭据，**不要**恢复上次的自动播出状态。
 -- OBS 启动（脚本加载）后应处于待命，由操作员在面板/网页里手动开启。
 -- open_admin=true：顺便请引擎帮我们打开浏览器（自己起进程会闪命令行窗口）。
-local function build_payload(settings, apply_enabled, open_admin)
+local function build_payload(settings, apply_enabled, open_admin, force)
   local token = ensure_token(settings)
   local enabled = (apply_enabled ~= false)
     and obs.obs_data_get_bool(settings, "scheduler_enabled")
@@ -229,7 +229,7 @@ local function build_payload(settings, apply_enabled, open_admin)
   return string.format(
     '{\n  "bootstrap_token": "%s",\n  "host": %s,\n  "port": %s,\n'
       .. '  "password": "%s",\n  "tls": %s,\n  "target_input": %s,\n'
-      .. '  "enabled": %s,\n  "open_admin": %s,\n  "ts": %d\n}\n',
+      .. '  "enabled": %s,\n  "open_admin": %s,\n  "force": %s,\n  "ts": %d\n}\n',
     json_escape(token),
     opt_str(obs.obs_data_get_string(settings, "ws_host")),
     port_json,
@@ -238,13 +238,14 @@ local function build_payload(settings, apply_enabled, open_admin)
     opt_str(obs.obs_data_get_string(settings, "target_input")),
     enabled and "true" or "false",
     open_admin and "true" or "false",
+    force and "true" or "false",
     os.time() * 1000
   )
 end
 
-local function push_settings(settings, apply_enabled, open_admin)
+local function push_settings(settings, apply_enabled, open_admin, force)
   if settings == nil then return false end
-  local payload = build_payload(settings, apply_enabled, open_admin == true)
+  local payload = build_payload(settings, apply_enabled, open_admin == true, force == true)
   local written = 0
   for _, dir in ipairs(bridge_dirs()) do
     if write_file(dir .. BRIDGE_NAME, payload) then
@@ -278,7 +279,9 @@ function on_test_clicked(props, property)
     obs.blog(obs.LOG_WARNING, LOG_TAG .. "engine could not be started")
     return true
   end
-  if script_settings ~= nil then push_settings(script_settings) end
+  -- force = true：操作员按了 Test Connection，就是要以脚本属性为准，
+  -- 平时引擎以网页面板的设置为主（否则两边会互相覆盖）。
+  if script_settings ~= nil then push_settings(script_settings, false, false, true) end
   local s = status_text()
   if s == nil then
     obs.blog(obs.LOG_WARNING,
