@@ -63,6 +63,8 @@ function parseBeijingInput(v) {
 let ws = null;
 let wsReconnectTimer = null;
 let lastSnapshot = null;
+/// 临时的主控台错误提示（比引擎的 last_error 优先级高，十几秒后自动让位）。
+let dashErrorOverride = null;
 let playlistCache = [];
 let bumpersCache = [];
 
@@ -348,6 +350,18 @@ function renderConsole(s) {
     setText('ctl-info-current', sch.current_program_name || '—');
     setText('sb-obs', sch.obs_connected ? '已连接' : '未连接');
 
+    // 引擎最近一次失败直接摆在主控台上：用户点了「启用自动播出」没反应时，
+    // 原因（OBS 未连接 / 目标源不对 / 节目时间都过去了）就在这里。
+    const errEl = document.getElementById('ctl-error');
+    if (errEl) {
+        const override = dashErrorOverride && Date.now() < dashErrorOverride.until
+            ? dashErrorOverride.msg
+            : '';
+        const err = override || sch.last_error || '';
+        errEl.textContent = err;
+        errEl.hidden = !err;
+    }
+
     const badge = document.getElementById('ctl-onair-badge');
     if (badge) badge.classList.toggle('on', running);
 
@@ -469,6 +483,8 @@ function setupDashboardActions() {
             }
         });
     }
+    const ctlDiag = document.getElementById('ctl-diag');
+    if (ctlDiag) ctlDiag.addEventListener('click', runDiagnostics);
     const ctlClearLog = document.getElementById('ctl-clear-log');
     if (ctlClearLog) {
         ctlClearLog.addEventListener('click', () => {
@@ -511,8 +527,10 @@ async function toggleArmed() {
             if (!check.ok) {
                 log(check.message);
                 setPlaylistStatus(check.message, 'err');
+                showDashError(check.message);
                 return;
             }
+            dashErrorOverride = null;
             // Arming re-bases the list on *this* moment: later than planned ->
             // everything 顺延; earlier -> everything 提前. No manual fixups.
             await apiPost(API.start, {
@@ -542,6 +560,17 @@ async function toggleArmed() {
     }
 }
 
+/// 把一条失败原因同时摆到主控台和活动日志上。前端自己拦下来的问题
+/// （比如目标源不对）以前只写在「节目清单」页，在主控台点按钮的人根本看不见。
+function showDashError(msg) {
+    dashErrorOverride = msg ? { msg, until: Date.now() + 15_000 } : null;
+    const el = document.getElementById('ctl-error');
+    if (el) {
+        el.textContent = msg || '';
+        el.hidden = !msg;
+    }
+}
+
 /// 点了「启用自动播出」之后真的去核对一次：如果引擎没起来，把原因说出来，
 /// 而不是让按钮悄悄变回「启用自动播出」让人以为网络卡了。
 async function reportArmResult() {
@@ -558,6 +587,103 @@ async function reportArmResult() {
     const msg = `自动播出没有启动${why}${extra ? ' ' + extra : ''}`;
     log(msg);
     setPlaylistStatus(msg, 'err');
+    showDashError(msg);
+}
+
+/// 一键自检：把"为什么播不出来"要看的东西一次全列出来。
+/// 播出起不来基本就那几种原因（OBS 没连上 / 目标源名字不对 / 文件不见了 /
+/// 节目时间都过去了），与其一个个猜，不如一次全查。
+async function runDiagnostics() {
+    log('—— 开始自检 ——');
+    let snap = {};
+    try {
+        snap = await fetch(API.status).then(r => r.json());
+        lastSnapshot = snap;
+    } catch (e) {
+        log(`✗ 引擎没有响应：${(e && e.message) || e}`);
+        showDashError('引擎没有响应：确认 OBS 正在运行（引擎由 OBS 脚本拉起）');
+        return;
+    }
+
+    const lines = [];
+    const bad = [];
+    const sch = snap.scheduler || snap.status || {};
+    lines.push(`引擎：状态 ${sch.scheduler_state || 'Idle'}｜调度${sch.scheduler_running ? '运行中' : '未运行'}`);
+
+    if (sch.obs_connected) {
+        lines.push('OBS：已连接 ✓');
+    } else {
+        const why = sch.obs_error ? `（${sch.obs_error}）` : '';
+        lines.push(`OBS：未连接 ✗${why}`);
+        bad.push(`OBS 未连接${why}：到「设置」页核对 obs-websocket 的端口与密码，再点「测试连接」`);
+    }
+
+    const target = snap.target_input || '';
+    try {
+        const j = await fetch('/api/obs/inputs').then(r => r.json());
+        const list = j.inputs || [];
+        if (!list.length) {
+            lines.push('目标源：无法枚举（OBS 未连接）');
+        } else {
+            const want = String(target).trim().toLowerCase();
+            const hit = list.find(i => String(i.inputName || '').trim().toLowerCase() === want);
+            if (hit) {
+                lines.push(`目标源：${target} ✓（类型 ${hit.inputKind || '未知'}）`);
+            } else {
+                lines.push(`目标源：${target || '(空)'} ✗`);
+                bad.push(`目标媒体源「${target || '(空)'}」在 OBS 里不存在。OBS 现有来源：`
+                    + list.map(i => i.inputName).join('、') + '。请到「设置」页重新选择并保存');
+            }
+        }
+    } catch (_) {
+        lines.push('目标源：查询失败');
+    }
+
+    let items = [];
+    try {
+        const p = await fetch(API.playlist).then(r => r.json());
+        items = p.items || [];
+        playlistCache = items;
+    } catch (_) {}
+    lines.push(`节目单：共 ${items.length} 条`);
+    if (!items.length) {
+        bad.push('节目单是空的：先点「导入素材」把节目加进来');
+    } else {
+        try {
+            const v = await apiPost(API.verify, {});
+            const missing = (v && v.missing) || [];
+            if (missing.length) {
+                lines.push(`节目单：${missing.length} 条文件丢失 ✗`);
+                bad.push(`有 ${missing.length} 条节目的文件找不到了（节目表里标红那几条）：换文件或删掉它们`);
+            } else {
+                lines.push('节目单：文件都在 ✓');
+            }
+        } catch (_) {}
+        const now = Date.now();
+        const pending = items.filter(p => p.start_at_ms > now);
+        lines.push(`节目单：待播 ${pending.length} 条`
+            + (pending.length ? `，首条 ${fmtBeijing(pending[0].start_at_ms)}` : ''));
+        if (!pending.length) {
+            bad.push('节目单里所有节目的播出时间都已过去：点「启用自动播出」会按当前时刻重排，然后再试');
+        }
+    }
+
+    const ntp = snap.ntp || {};
+    if (ntp.error) lines.push(`授时：${ntp.error}`);
+    else if (ntp.offset_ms != null) lines.push(`授时：${ntp.server}｜偏差 ${ntp.offset_ms}ms`);
+
+    if (sch.last_error) lines.push(`引擎最近报错：${sch.last_error}`);
+
+    for (const l of lines) log(`  ${l}`);
+    if (bad.length) {
+        log('—— 自检发现问题 ——');
+        for (const b of bad) log(`  ✗ ${b}`);
+        showDashError(bad[0]);
+        setPlaylistStatus(bad[0], 'err');
+    } else {
+        log('—— 自检通过，没有发现明显问题 ——');
+        showDashError('');
+    }
 }
 
 /* -------------------------------------------------------------------------- */

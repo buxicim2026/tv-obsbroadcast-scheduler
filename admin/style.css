@@ -750,6 +750,19 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
 
 .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
+/* 主控台：引擎报错条 —— 让「启用后没反应」当场就能看到原因 */
+.ctl-err {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.38);
+    color: #fca5a5;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.ctl-err[hidden] { display: none; }
+
 /* 节目清单：名称可能很长，在单元格里截断显示，完整名称靠悬停浮窗查看 */
 #playlist-tbody td { white-space: nowrap; }
 .pl-name {

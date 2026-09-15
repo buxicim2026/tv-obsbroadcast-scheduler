@@ -39,6 +39,7 @@
             <button class="ctl-btn" id="ctl-goto-playlist">编排节目单</button>
             <button class="ctl-btn" id="ctl-reload">重新载入</button>
             <button class="ctl-btn" id="ctl-clear-log">清空日志</button>
+            <button class="ctl-btn" id="ctl-diag">自检</button>
             <span class="ctl-vsep"></span>
             <button class="ctl-btn ctl-armed" id="btn-armed">启用自动播出</button>
             <button class="ctl-btn" id="btn-pause">暂停</button>
@@ -94,6 +95,8 @@
                     <div class="ctl-info-row"><span>备播时间</span><b id="dash-next-start">--:--:--</b></div>
                     <div class="ctl-info-row"><span>备播倒计时</span><b id="ctl-info-nextcd">--:--:--</b></div>
                     <div class="ctl-info-row"><span>节目表总长</span><b id="ctl-info-total">--:--:--</b></div>
+                    <!-- 引擎报的错直接显示在这里：「点了启用却没反应」时就靠它给出原因 -->
+                    <div class="ctl-err" id="ctl-error" hidden></div>
                 </div>
 
                 <div class="ctl-panel ctl-bumpers">
@@ -341,8 +344,9 @@
                     </div>
                 </div>
                 <p class="text-muted text-xs mt-3">
-                    启用后，**报时器与整个播出的时间基准都按授时中心的时间走**。本机系统时间不准
-                    （主板电池没电、被手工改过、域控制器时间错误）也不会影响播出与报时。
+                    报时器按授时中心的时间显示，所以本机时钟不准也不会报错时间。
+                    播出调度仍使用本机系统时间（另有「时钟偏移」可手动对齐外部主时钟）——
+                    这样即使授时异常，也只会影响报时显示，不可能让节目播不出来。
                 </p>
             </div>
 

@@ -12,16 +12,15 @@ use crate::config::{BumperEntry, Config, ProgramEntry, ProgramKind, SchedulerCon
 
 /// Returns the effective wall clock the scheduler should use.
 ///
-/// Two corrections stack on top of the local clock:
-///   * `scheduler.clock_offset_ms` — the operator's manual trim against an
-///     external master clock;
-///   * the NTP offset — measured against 国家授时中心, so a wrong PC clock
-///     (flat battery, bad manual change, broken domain controller) no longer
-///     moves the schedule or the on-screen 报时 off true time.
+/// Deliberately **not** NTP-corrected. The station clock overlay uses the NTP
+/// offset, but the schedule runs on the local clock (plus the operator's manual
+/// `clock_offset_ms` trim): if a time server ever answered with something
+/// absurd, the worst case should be a wrong 报时 — never a schedule that can't
+/// find any of its programmes. Rule out the whole class of failure instead of
+/// clamping it.
 pub fn effective_now_ms(cfg: &SchedulerConfig) -> i64 {
     let raw = Utc::now().timestamp_millis();
     raw.saturating_add(cfg.clock_offset_ms)
-        .saturating_add(crate::ntp::sane_offset(crate::ntp::ntp_offset_ms()))
 }
 
 /// `now_ms` falls in `[start_at_ms, start_at_ms + declared_duration_ms)`.

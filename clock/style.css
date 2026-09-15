@@ -88,7 +88,7 @@ html, body {
     /* Shrink only the digits. The plate's padding is in em relative to the
        *plate* font-size, so the oval keeps its size — the digits just sit
        inside it with more breathing room. */
-    font-size: 0.78em;
+    font-size: 0.6em;
     filter: drop-shadow(0 0 0.045em rgba(255, 255, 255, 0.55));
 }
 

@@ -45,6 +45,13 @@ static LAST_WATCHDOG_MS: AtomicI64 = AtomicI64::new(0);
 /// `LAST_MISSING_WARN`: without it we would log/write on every 50ms tick).
 static LAST_IDLE_WARN: AtomicI64 = AtomicI64::new(0);
 
+/// Throttle for "armed but OBS is not connected".
+static LAST_DISCONNECT_WARN: AtomicI64 = AtomicI64::new(0);
+
+/// Throttle for "the cut itself failed" (no OBS link, bad target source, OBS
+/// rejecting the request).
+static LAST_CUT_WARN: AtomicI64 = AtomicI64::new(0);
+
 /// How long to wait for OBS to finish opening the new file before starting it
 /// anyway, and how often to ask.
 const SWITCH_READY_TIMEOUT_MS: u64 = 1_500;
@@ -215,6 +222,22 @@ impl Scheduler {
                         st.current_program_name = None;
                         st.current_remaining_ms = None;
                         st.paused = false;
+                    }
+                    // Armed but OBS isn't connected. This is the number one
+                    // reason "I pressed start and nothing happened", so say it
+                    // instead of sitting silently in Idle.
+                    if enabled && !connected {
+                        let now = Utc::now().timestamp_millis();
+                        if now - LAST_DISCONNECT_WARN.load(Ordering::Relaxed) > 5_000
+                            && st.last_error.is_none()
+                        {
+                            LAST_DISCONNECT_WARN.store(now, Ordering::Relaxed);
+                            st.last_error = Some(
+                                "OBS 未连接，无法播出：请确认 obs-websocket 已启用、端口与密码正确\
+                                 （设置页点「测试连接」查看原因）"
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
                 prev_active = false;
@@ -469,8 +492,20 @@ impl Scheduler {
                             }
                         }
                         // No OBS link yet (or the RPC failed): stay Idle and
-                        // retry on the next tick rather than freezing in Error.
-                        Err(e) => debug!("take-over cut not possible yet: {e}"),
+                        // retry on the next tick rather than freezing in Error —
+                        // but don't hide it either, or "started but nothing
+                        // plays" has no explanation anywhere.
+                        Err(e) => {
+                            let now = Utc::now().timestamp_millis();
+                            if now - LAST_CUT_WARN.load(Ordering::Relaxed) > 5_000 {
+                                LAST_CUT_WARN.store(now, Ordering::Relaxed);
+                                warn!("cannot take over '{}': {e}", p.name);
+                                state.status.write().last_error = Some(format!(
+                                    "无法播出「{}」：{e}（请检查目标媒体源是否正确、OBS 是否已连接）",
+                                    p.name
+                                ));
+                            }
+                        }
                     }
                 } else if let Some(next) = crate::playlist::next_program(cfg, now_ms) {
                     let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
@@ -517,8 +552,18 @@ impl Scheduler {
                         match self.cut_to(cfg, p).await {
                             Ok(true) => {
                                 // Missing file + SkipToNext: don't start it,
-                                // re-arm for the following program.
+                                // re-arm for the following program — but say so,
+                                // otherwise "started and nothing played" again
+                                // has no explanation.
                                 warn!("skipping missing program {} ({})", p.name, p.file_path);
+                                let now = Utc::now().timestamp_millis();
+                                if now - LAST_CUT_WARN.load(Ordering::Relaxed) > 5_000 {
+                                    LAST_CUT_WARN.store(now, Ordering::Relaxed);
+                                    state.status.write().last_error = Some(format!(
+                                        "跳过「{}」：文件不存在或无法读取（{}）",
+                                        p.name, p.file_path
+                                    ));
+                                }
                                 match crate::playlist::next_program(
                                     cfg,
                                     p.start_at_ms.saturating_add(1),
@@ -669,6 +714,14 @@ impl Scheduler {
                                     "skipping missing program {} ({})",
                                     next.name, next.file_path
                                 );
+                                let now = Utc::now().timestamp_millis();
+                                if now - LAST_CUT_WARN.load(Ordering::Relaxed) > 5_000 {
+                                    LAST_CUT_WARN.store(now, Ordering::Relaxed);
+                                    state.status.write().last_error = Some(format!(
+                                        "跳过「{}」：文件不存在或无法读取（{}）",
+                                        next.name, next.file_path
+                                    ));
+                                }
                                 match program_after(cfg, &next.id) {
                                     Some(n2) => {
                                         let fire_at = n2.start_at_ms.saturating_sub(lead_in as i64);
