@@ -21,7 +21,7 @@ use crate::config::{BumperEntry, Config, ProgramEntry, ProgramKind, SchedulerCon
 pub fn effective_now_ms(cfg: &SchedulerConfig) -> i64 {
     let raw = Utc::now().timestamp_millis();
     raw.saturating_add(cfg.clock_offset_ms)
-        .saturating_add(crate::ntp::ntp_offset_ms())
+        .saturating_add(crate::ntp::sane_offset(crate::ntp::ntp_offset_ms()))
 }
 
 /// `now_ms` falls in `[start_at_ms, start_at_ms + declared_duration_ms)`.

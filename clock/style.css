@@ -85,6 +85,10 @@ html, body {
     display: flex;
     align-items: center;
     gap: 0.06em;
+    /* Shrink only the digits. The plate's padding is in em relative to the
+       *plate* font-size, so the oval keeps its size — the digits just sit
+       inside it with more breathing room. */
+    font-size: 0.78em;
     filter: drop-shadow(0 0 0.045em rgba(255, 255, 255, 0.55));
 }
 
@@ -100,8 +104,9 @@ html, body {
     position: absolute;
     display: block;
     background: #fff;
-    /* Unlit segments stay faintly visible, the way a real LED panel looks. */
-    opacity: 0.06;
+    /* Unlit segments are all but invisible — barely a ghost of the shape, so
+       the display reads as clean white digits on the plate. */
+    opacity: 0.035;
     transition: opacity 60ms linear;
 }
 .seg.on { opacity: 1; }

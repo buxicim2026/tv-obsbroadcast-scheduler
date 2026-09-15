@@ -523,6 +523,10 @@ async function toggleArmed() {
             // Clear any stale pre-flight complaint: it used to stay on the
             // playlist page forever, so a fixed configuration still looked broken.
             setPlaylistStatus('已开始自动播出，节目单已按当前时刻对齐', 'ok');
+            // Verify rather than assume: if the engine didn't actually come up,
+            // say why instead of leaving the operator staring at a button that
+            // quietly went back to "启用自动播出".
+            setTimeout(reportArmResult, 2500);
         }
         await refreshAll();
         // Pull once more a moment later: the scheduler needs a tick to flip
@@ -536,6 +540,24 @@ async function toggleArmed() {
             btn.textContent = running ? '启用自动播出' : '停用自动播出';
         }
     }
+}
+
+/// 点了「启用自动播出」之后真的去核对一次：如果引擎没起来，把原因说出来，
+/// 而不是让按钮悄悄变回「启用自动播出」让人以为网络卡了。
+async function reportArmResult() {
+    await refreshAll();
+    const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
+    if (sch.scheduler_running) return;
+    const why = sch.last_error ? `（${sch.last_error}）` : '';
+    let extra = '';
+    if (!sch.obs_connected) {
+        extra = 'OBS 未连接：检查 obs-websocket 的端口与密码（设置页点「测试连接」）。';
+    } else if (!playlistCache.length) {
+        extra = '节目单是空的：先导入节目文件。';
+    }
+    const msg = `自动播出没有启动${why}${extra ? ' ' + extra : ''}`;
+    log(msg);
+    setPlaylistStatus(msg, 'err');
 }
 
 /* -------------------------------------------------------------------------- */

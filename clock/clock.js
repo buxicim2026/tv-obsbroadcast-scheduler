@@ -63,8 +63,10 @@ function buildDigits() {
     digits.innerHTML = '';
     digitEls = [];
     colonEls = [];
+    // Layout is D D : D D : D D — the colons sit at slots 2 and 5. Slot 4 is a
+    // digit: using it for the second colon produced "15:5:945".
     for (let i = 0; i < 8; i++) {
-        if (i === 2 || i === 4) {
+        if (i === 2 || i === 5) {
             const colon = document.createElement('div');
             colon.className = 'seg-colon';
             colon.innerHTML = '<i></i><i></i>';

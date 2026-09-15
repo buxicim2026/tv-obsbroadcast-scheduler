@@ -34,9 +34,22 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(4);
 /// through every scheduler call site.
 static NTP_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
 
+/// Beyond this, an offset is almost certainly a parsing artefact or a broken
+/// upstream device (a router serving its own wrong time), not a real clock
+/// error — and applying it would push every programme far outside its window,
+/// so the scheduler would silently find nothing to play.
+const MAX_PLAUSIBLE_OFFSET_MS: i64 = 6 * 60 * 60 * 1000; // 6 hours
+
 /// The offset currently in force. Positive means the local clock is behind.
+/// Always sanity-limited: a wild value must never be able to move the schedule.
 pub fn ntp_offset_ms() -> i64 {
-    NTP_OFFSET_MS.load(Ordering::Relaxed)
+    sane_offset(NTP_OFFSET_MS.load(Ordering::Relaxed))
+}
+
+/// Clamp an offset into the plausible range. Used both when storing a sample and
+/// when reading it back, so a bad value can't reach the scheduler either way.
+pub fn sane_offset(ms: i64) -> i64 {
+    ms.clamp(-MAX_PLAUSIBLE_OFFSET_MS, MAX_PLAUSIBLE_OFFSET_MS)
 }
 
 fn set_ntp_offset_ms(v: i64) {
@@ -140,6 +153,10 @@ pub async fn sync(servers: &[String]) -> std::result::Result<(String, i64), Stri
             continue;
         }
         match query_offset_ms(name).await {
+            Ok(off) if off.abs() > MAX_PLAUSIBLE_OFFSET_MS => {
+                last = format!("{name}: 偏差 {off}ms 超出合理范围，已忽略");
+                warn!("ntp: {last}");
+            }
             Ok(off) => return Ok((name.to_string(), off)),
             Err(e) => {
                 last = format!("{name}: {e:#}");

@@ -41,6 +41,10 @@ const SWITCH_SETTLE_MS: u64 = 300;
 /// Watchdog throttle: check what OBS is actually doing about once a second.
 static LAST_WATCHDOG_MS: AtomicI64 = AtomicI64::new(0);
 
+/// Throttle for "armed but there is nothing left to play" (same idea as
+/// `LAST_MISSING_WARN`: without it we would log/write on every 50ms tick).
+static LAST_IDLE_WARN: AtomicI64 = AtomicI64::new(0);
+
 /// How long to wait for OBS to finish opening the new file before starting it
 /// anyway, and how often to ask.
 const SWITCH_READY_TIMEOUT_MS: u64 = 1_500;
@@ -471,6 +475,24 @@ impl Scheduler {
                 } else if let Some(next) = crate::playlist::next_program(cfg, now_ms) {
                     let fire_at = next.start_at_ms - cfg.scheduler.lead_in_ms as i64;
                     self.transition_to_armed(state, next, fire_at, machine);
+                } else if !cfg.playlist.items.is_empty() {
+                    // Armed, but nothing is on air and nothing is still to come:
+                    // every row's start time has already passed. This is exactly
+                    // what "pressed start and nothing happened" looks like, so
+                    // say it out loud instead of sitting silent in Idle.
+                    let now = Utc::now().timestamp_millis();
+                    if now - LAST_IDLE_WARN.load(Ordering::Relaxed) > 5_000 {
+                        LAST_IDLE_WARN.store(now, Ordering::Relaxed);
+                        warn!(
+                            "nothing to play: all {} programme(s) are scheduled before now",
+                            cfg.playlist.items.len()
+                        );
+                        state.status.write().last_error = Some(
+                            "节目单里所有节目的播出时间都已过去：请点「启用自动播出」（它会按当前时刻重排）\
+                             或用「按开播时间重排」后重试"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             SchedulerState::Armed {
