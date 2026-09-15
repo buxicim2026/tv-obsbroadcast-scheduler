@@ -307,6 +307,7 @@ impl Default for Config {
             },
             playlist: PlaylistState::default(),
             bootstrap_token: None,
+            clock: ClockConfig::default(),
         }
     }
 }
