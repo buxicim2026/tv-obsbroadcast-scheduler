@@ -19,11 +19,15 @@
         <span class="font-bold text-lg tracking-tight">自动播出</span>
         <span class="text-muted text-xs">tv-obsbroadcast-scheduler</span>
     </div>
-    <nav class="flex items-center gap-1" id="top-nav">
-        <button data-tab="dashboard" class="nav-tab nav-tab-active">主控台</button>
-        <button data-tab="playlist" class="nav-tab">节目表</button>
-        <button data-tab="settings" class="nav-tab">设置</button>
-    </nav>
+    <div class="flex items-center gap-4">
+        <nav class="flex items-center gap-1" id="top-nav">
+            <button data-tab="dashboard" class="nav-tab nav-tab-active">主控台</button>
+            <button data-tab="playlist" class="nav-tab">节目表</button>
+            <button data-tab="settings" class="nav-tab">设置</button>
+        </nav>
+        <!-- 播出时钟：放在标题栏，任何页面都能一眼看到 -->
+        <span class="hdr-clock" id="ctl-clock">--:--:--</span>
+    </div>
 </header>
 
 <main class="px-6 py-6 max-w-screen-2xl mx-auto">
@@ -43,8 +47,6 @@
             <button class="ctl-btn ctl-armed" id="btn-armed">启用自动播出</button>
             <button class="ctl-btn" id="btn-pause">暂停</button>
             <button class="ctl-btn" id="btn-next">下一档</button>
-            <span class="ctl-spacer"></span>
-            <span class="ctl-clock" id="ctl-clock">--:--:--</span>
         </div>
 
         <div class="ctl-main">
@@ -157,7 +159,10 @@
                 <label class="text-xs text-muted" for="schedule-start-at">开播时间（本机时间）</label>
                 <input id="schedule-start-at" type="datetime-local" class="form-input" />
                 <button class="btn btn-secondary" id="btn-apply-start">⏱ 按开播时间重排</button>
-                <span class="text-muted text-xs">留空则点「开始自动播出」时以那一刻为基准，节目单自动顺延或提前。</span>
+                <span class="text-muted text-xs">
+                    填好开播时间后点这个按钮，整张节目单就从那一刻起顺序排出；之后点「启用自动播出」只是启用，
+                    <b>节目按你设定的时间播出，不会从点击那一刻重排</b>。
+                </span>
             </div>
 
             <div id="playlist-status" class="text-xs mt-2" role="status" aria-live="polite"></div>

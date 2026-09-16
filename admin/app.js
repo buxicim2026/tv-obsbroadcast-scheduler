@@ -531,16 +531,32 @@ async function toggleArmed() {
             } else {
                 dashErrorOverride = null;
             }
-            // Arming re-bases the list on *this* moment: later than planned ->
-            // everything 顺延; earlier -> everything 提前. No manual fixups.
-            await apiPost(API.start, {
-                ids: playlistCache.map(p => p.id),
-                from_now: true,
-            });
-            log('已开始自动播出（节目单已按当前时刻对齐）');
-            // Clear any stale pre-flight complaint: it used to stay on the
-            // playlist page forever, so a fixed configuration still looked broken.
-            setPlaylistStatus('已开始自动播出，节目单已按当前时刻对齐', 'ok');
+            // 只启用，不重排：节目按节目表里已经设定好的时间播。
+            // 想整体顺延/提前，用节目表页的「开播时间 + ⏱ 按开播时间重排」——
+            // 点一下启用就把整张表改成"从现在开始"曾经让人无法提前排期。
+            await apiPost(API.enable, { enabled: true });
+            const nowTs = Date.now();
+            const upcoming = playlistCache
+                .filter(p => (p.start_at_ms || 0)
+                    + (p.detected_duration_ms || p.declared_duration_ms || 0) > nowTs)
+                .sort((a, b) => a.start_at_ms - b.start_at_ms);
+            if (!playlistCache.length) {
+                setPlaylistStatus('已启用自动播出，但节目表是空的：先到「节目表」页导入节目', 'err');
+                log('已启用自动播出，但节目表是空的');
+            } else if (!upcoming.length) {
+                const msg = '已启用自动播出，但节目表里所有节目的播出时间都已过去 —— 不会自动开播。'
+                    + '请到「节目表」页填写开播时间并点「⏱ 按开播时间重排」。';
+                log(msg);
+                setPlaylistStatus(msg, 'err');
+                showDashError(msg);
+            } else {
+                const first = upcoming[0];
+                const when = first.start_at_ms > nowTs
+                    ? `第一档「${first.name}」将在 ${fmtLocal(first.start_at_ms)} 开播`
+                    : `正在接管当前这一档「${first.name}」`;
+                log(`已启用自动播出（按设定时间表）：${when}`);
+                setPlaylistStatus(`已启用自动播出 —— ${when}`, 'ok');
+            }
             // Verify rather than assume: if the engine didn't actually come up,
             // say why instead of leaving the operator staring at a button that
             // quietly went back to "启用自动播出".

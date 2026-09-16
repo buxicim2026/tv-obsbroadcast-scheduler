@@ -750,6 +750,20 @@ body.dock #timeline-hours span:nth-child(6n+1) { display: block; }
 
 .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
+/* 标题栏上的播出时钟 */
+.hdr-clock {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
+    padding: 3px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--fg);
+    white-space: nowrap;
+}
+
 /* 主控台：引擎报错条 —— 让「启用后没反应」当场就能看到原因 */
 .ctl-err {
     margin-top: 10px;
