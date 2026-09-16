@@ -142,12 +142,37 @@ pub struct Scheduler {
     /// client, and holding one `Arc<ObsWsClient>` forever meant the scheduler
     /// kept talking to a dead socket after OBS restarted.
     pub obs: ClientHandle,
-    pub target_input: String,
+    /// Name of the OBS Media Source we drive. Behind a lock, and refreshed from
+    /// the config on every tick: holding the startup value meant that after the
+    /// operator picked a real source in the panel, every cut still addressed the
+    /// built-in default — OBS answered "No source was found by the name of
+    /// `main_media` within the canvas `Main`" and nothing ever played.
+    pub target_input: Arc<parking_lot::RwLock<String>>,
 }
 
 impl Scheduler {
     pub fn new(obs: ClientHandle, target_input: String) -> Self {
-        Self { obs, target_input }
+        Self {
+            obs,
+            target_input: Arc::new(parking_lot::RwLock::new(target_input)),
+        }
+    }
+
+    /// The target source name in force right now.
+    fn target(&self) -> String {
+        self.target_input.read().clone()
+    }
+
+    /// Pick up a target-source change made in the web panel.
+    fn refresh_target(&self, config_target: &str) {
+        let mut cur = self.target_input.write();
+        if cur.as_str() != config_target {
+            info!(
+                "target media source changed: '{}' -> '{}'",
+                *cur, config_target
+            );
+            *cur = config_target.to_string();
+        }
     }
 
     /// Current live OBS client, or `None` while disconnected.
@@ -177,6 +202,13 @@ impl Scheduler {
             ticks += 1;
             if ticks % 20 == 0 {
                 cfg_snapshot = Arc::new(state.config.read().clone());
+            }
+            // Follow a target-source change the operator just saved in the panel.
+            // Cheap (one read lock) and it has to be per-tick: the whole point is
+            // that a change takes effect immediately, not after a restart.
+            {
+                let want = state.config.read().target_input.clone();
+                self.refresh_target(&want);
             }
 
             // Transport commands from the console (pause / resume / next /
@@ -310,8 +342,9 @@ impl Scheduler {
                 }
                 .max(0);
                 if let Some(client) = self.client() {
+                    let target = self.target();
                     if let Err(e) = client
-                        .trigger_media_input_action(&self.target_input, MediaInputAction::Pause)
+                        .trigger_media_input_action(&target, MediaInputAction::Pause)
                         .await
                     {
                         warn!("pause: OBS rejected the action: {e}");
@@ -342,8 +375,9 @@ impl Scheduler {
                     }
                 };
                 if let Some(client) = self.client() {
+                    let target = self.target();
                     if let Err(e) = client
-                        .trigger_media_input_action(&self.target_input, MediaInputAction::Play)
+                        .trigger_media_input_action(&target, MediaInputAction::Play)
                         .await
                     {
                         warn!("resume: OBS rejected PLAY: {e}");
@@ -659,9 +693,8 @@ impl Scheduler {
                                 warn!("bumper skipped: no obs-websocket connection");
                                 return;
                             };
-                            match crate::interrupt::trigger_bumper(&client, &self.target_input, b)
-                                .await
-                            {
+                            let target = self.target();
+                            match crate::interrupt::trigger_bumper(&client, &target, b).await {
                                 Ok(()) => {
                                     let return_to = crate::interrupt::return_to_ms(b);
                                     self.transition_to_interstitial(
@@ -775,9 +808,9 @@ impl Scheduler {
                         warn!("resume primary skipped: no obs-websocket connection");
                         return;
                     };
+                    let target = self.target();
                     if let Err(e) =
-                        crate::interrupt::trigger_resume_primary(&client, &self.target_input, p)
-                            .await
+                        crate::interrupt::trigger_resume_primary(&client, &target, p).await
                     {
                         warn!("resume primary failed: {e}");
                     }
@@ -971,7 +1004,8 @@ impl Scheduler {
         LAST_WATCHDOG_MS.store(now, Ordering::Relaxed);
 
         let Some(client) = self.client() else { return };
-        let Ok(s) = client.get_media_input_status(&self.target_input).await else {
+        let target = self.target();
+        let Ok(s) = client.get_media_input_status(&target).await else {
             return;
         };
         let st = s.media_state.to_ascii_uppercase();
@@ -995,18 +1029,18 @@ impl Scheduler {
 
         warn!(
             "watchdog: source '{}' is {} {}ms into '{}'; re-applying the file and restarting",
-            self.target_input, s.media_state, into_ms, p.name
+            target, s.media_state, into_ms, p.name
         );
         let _ = client
             .set_input_settings(
-                &self.target_input,
+                &target,
                 crate::interrupt::settings_payload(&p.file_path),
                 true,
             )
             .await;
         tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
         let _ = client
-            .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
+            .trigger_media_input_action(&target, MediaInputAction::Restart)
             .await;
     }
 
@@ -1015,7 +1049,7 @@ impl Scheduler {
     /// spawned task.
     fn spawn_playback_confirm(&self, state: &crate::AppState, p: &ProgramEntry) {
         let obs = self.obs.clone();
-        let input = self.target_input.clone();
+        let input = self.target();
         let fpath = p.file_path.clone();
         let st = state.clone();
         let pname = p.name.clone();
@@ -1042,8 +1076,8 @@ impl Scheduler {
         let Some(client) = self.client() else {
             return;
         };
-        let Some(dur) = crate::media_probe::probe_duration_ms(&client, &self.target_input).await
-        else {
+        let target = self.target();
+        let Some(dur) = crate::media_probe::probe_duration_ms(&client, &target).await else {
             return;
         };
         let new_end = {
@@ -1211,9 +1245,8 @@ impl Scheduler {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
-        client
-            .set_input_settings(&self.target_input, settings, true)
-            .await
+        let target = self.target();
+        client.set_input_settings(&target, settings, true).await
     }
 
     /// Hard-cut to `p`.
@@ -1245,15 +1278,16 @@ impl Scheduler {
         // programme had already run through the settle delay — every switch
         // replayed its opening second. Stopping first makes RESTART the single
         // start-of-playback event.
+        let target = self.target();
         let _ = client
-            .trigger_media_input_action(&self.target_input, MediaInputAction::Stop)
+            .trigger_media_input_action(&target, MediaInputAction::Stop)
             .await;
         // Always re-point the source at the file, even if the preload tick was
         // missed (engine restart, lead-in shorter than the RPC round-trip):
         // RESTART on its own would just replay whatever was configured before.
         client
             .set_input_settings(
-                &self.target_input,
+                &target,
                 crate::interrupt::settings_payload(&p.file_path),
                 true,
             )
@@ -1265,7 +1299,7 @@ impl Scheduler {
         // one it just wasted the interval with the source black.
         let deadline = std::time::Instant::now() + Duration::from_millis(SWITCH_READY_TIMEOUT_MS);
         loop {
-            match client.get_media_input_status(&self.target_input).await {
+            match client.get_media_input_status(&target).await {
                 Ok(s) => {
                     let state = s.media_state.to_ascii_uppercase();
                     // `mediaDuration > 0` proves the decoder parsed the file;
@@ -1294,11 +1328,11 @@ impl Scheduler {
             tokio::time::sleep(Duration::from_millis(SWITCH_POLL_MS)).await;
         }
         client
-            .trigger_media_input_action(&self.target_input, MediaInputAction::Restart)
+            .trigger_media_input_action(&target, MediaInputAction::Restart)
             .await?;
         info!(
             "cut to '{}' on input '{}' ({}ms)",
-            p.name, self.target_input, p.declared_duration_ms
+            p.name, target, p.declared_duration_ms
         );
         Ok(false)
     }
