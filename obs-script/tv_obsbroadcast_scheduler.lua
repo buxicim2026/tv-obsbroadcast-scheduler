@@ -334,7 +334,9 @@ function script_defaults(settings)
   obs.obs_data_set_default_int(settings, "ws_port", DEFAULT_WS_PORT)
   obs.obs_data_set_default_string(settings, "ws_password", "")
   obs.obs_data_set_default_bool(settings, "ws_tls", false)
-  obs.obs_data_set_default_string(settings, "target_input", "main_media")
+  -- 留空而不是预设一个占位名：脚本里填的名字曾经覆盖过网页里选好的媒体源，
+  -- 结果引擎一直去找一个并不存在的 "main_media"。留空即"不参与"。
+  obs.obs_data_set_default_string(settings, "target_input", "")
   obs.obs_data_set_default_bool(settings, "scheduler_enabled", false)
   obs.obs_data_set_default_string(settings, "bootstrap_token", "")
 end

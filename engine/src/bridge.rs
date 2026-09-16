@@ -189,17 +189,14 @@ pub async fn run(state: AppState, http_port: u16) {
 }
 
 fn apply(state: &AppState, p: &BridgePayload, http_port: u16) {
-    // Only take credentials (and the arm flag) from the script while the engine
-    // has none yet — or when the operator explicitly asked for it by pressing
-    // Test Connection (`force`). Otherwise the OBS script properties would
-    // silently overwrite whatever was configured in the web panel: that is how
-    // the target source went blank again after an OBS restart, and how autoplay
-    // kept getting switched back off.
-    let took_credentials = {
+    let force = p.force == Some(true);
+    let changed = {
         let mut cfg = state.config.write();
-        if cfg.bootstrapped && p.force != Some(true) {
-            false
-        } else {
+        let mut changed = false;
+
+        // Credentials come from the script while the engine has none yet — or
+        // when the operator explicitly pressed Test Connection (`force`).
+        if !cfg.bootstrapped || force {
             if let Some(h) = p.host.as_ref() {
                 cfg.obs_ws.host = h.clone();
             }
@@ -212,24 +209,50 @@ fn apply(state: &AppState, p: &BridgePayload, http_port: u16) {
             if let Some(v) = p.tls {
                 cfg.obs_ws.tls = v;
             }
-            if let Some(v) = p.target_input.as_ref() {
-                cfg.target_input = v.clone();
-            }
-            if let Some(v) = p.enabled {
-                cfg.scheduler.enabled = v;
-            }
             if let Some(v) = p.bootstrap_token.as_ref() {
                 if !v.is_empty() {
                     cfg.bootstrap_token = Some(v.clone());
                 }
             }
             cfg.bootstrapped = true;
-            true
+            changed = true;
         }
+
+        // Target source is handled separately, and much more conservatively: the
+        // script's own default is a placeholder (`main_media`) that usually does
+        // not exist in the operator's OBS. Copying that over a real choice is
+        // exactly what produced "No source was found by the name of `main_media`".
+        // So: only adopt the script's value when the panel has nothing usable
+        // yet, or when the operator forced it from the script panel.
+        if let Some(v) = p.target_input.as_ref() {
+            let candidate = v.trim().to_string();
+            let current = cfg.target_input.trim().to_string();
+            let panel_has_none = current.is_empty() || current == "main_media";
+            if !candidate.is_empty() && (panel_has_none || force) && candidate != current {
+                info!(
+                    "bridge: target media source '{}' -> '{}' (from the OBS script)",
+                    current, candidate
+                );
+                cfg.target_input = candidate;
+                changed = true;
+            }
+        }
+
+        // The arm flag is only taken on an explicit request: the script's
+        // checkbox defaults to off and would keep switching the channel off
+        // right after the operator started it from the panel.
+        if force {
+            if let Some(v) = p.enabled {
+                cfg.scheduler.enabled = v;
+                changed = true;
+            }
+        }
+
+        changed
     };
 
-    if !took_credentials {
-        debug!("bridge: ignoring the script's credentials — the panel is the source of truth now");
+    if !changed {
+        debug!("bridge: nothing to adopt from the OBS script (panel is the source of truth)");
     }
 
     if p.open_admin == Some(true) {
@@ -251,7 +274,7 @@ fn apply(state: &AppState, p: &BridgePayload, http_port: u16) {
 
     // Nothing of ours changed: don't rewrite config.json (it would also clobber
     // settings the operator just saved in the panel).
-    if took_credentials {
+    if changed {
         let cfg = state.config.read().clone();
         let path = crate::config_path();
         if let Err(e) = cfg.save_atomic(&path) {

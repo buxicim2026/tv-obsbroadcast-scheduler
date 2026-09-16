@@ -176,6 +176,30 @@
                 <span class="text-muted text-xs">直接用鼠标拖动行首的 ⠿ 即可调整播出顺序（已播出的节目不可拖动）。</span>
             </div>
 
+            <!-- 播出预设：整套节目表的保存 / 载入 / 迁移 -->
+            <div class="flex items-center gap-2 mt-3 flex-wrap">
+                <span class="text-xs text-muted">播出预设：</span>
+                <select class="form-input" id="preset-select" style="min-width:210px"></select>
+                <button class="btn btn-secondary" id="preset-load">载入（替换当前节目表）</button>
+                <span class="ctl-vsep"></span>
+                <input class="form-input" id="preset-name" placeholder="预设名称" style="width:150px" />
+                <button class="btn btn-secondary" id="preset-save">保存当前节目表</button>
+                <button class="btn btn-secondary" id="preset-delete">删除</button>
+                <span class="ctl-vsep"></span>
+                <button class="btn btn-secondary" id="preset-export">导出文件</button>
+                <button class="btn btn-secondary" id="preset-import-btn">导入文件</button>
+                <input type="file" id="preset-import" accept=".json,application/json" hidden />
+                <label class="inline-flex items-center gap-1 text-xs text-muted">
+                    <input type="checkbox" id="preset-with-settings" />
+                    连设置一起（Lead-in / 报时器等）
+                </label>
+            </div>
+            <p class="text-muted text-xs mt-2">
+                预设用来整套保存节目表：换电脑或重装系统后，把导出的 JSON 文件带过去，「导入文件」再「载入」即可恢复。
+                <b>载入会清空并替换当前节目表</b>，请先把现有内容保存成预设或导出。
+                注意：文件路径不会跟着变，换机器后原本在其他盘符/目录的视频需要重新添加。
+            </p>
+
             <div class="overflow-x-auto mt-3">
                 <table class="w-full text-sm">
                     <thead>

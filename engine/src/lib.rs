@@ -10,6 +10,7 @@ pub mod media_probe;
 pub mod ntp;
 pub mod obs_ws;
 pub mod playlist;
+pub mod presets;
 pub mod scheduler;
 pub mod server;
 

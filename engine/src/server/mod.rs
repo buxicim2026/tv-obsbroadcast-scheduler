@@ -122,6 +122,12 @@ pub fn build_router(state: AppState, _assets: DistAssets) -> Router {
         .route("/api/scheduler/next", post(schedule_api::skip_to_next))
         .route("/api/scheduler/reload", post(schedule_api::reload_config))
         .route("/api/time/sync", post(schedule_api::sync_time))
+        .route("/api/presets", get(schedule_api::list_presets))
+        .route("/api/presets/one", get(schedule_api::get_preset))
+        .route("/api/presets/save", post(schedule_api::save_preset))
+        .route("/api/presets/load", post(schedule_api::load_preset))
+        .route("/api/presets/import", post(schedule_api::import_preset))
+        .route("/api/presets/delete", post(schedule_api::delete_preset))
         .route("/ws", get(ws_push::ws_handler))
         // axum caps buffered request bodies at 2 MiB by default, which silently
         // rejected every media upload (a single video is far bigger). The

@@ -623,6 +623,139 @@ pub async fn reload_config(
     Ok(Json(json!({"ok": true})))
 }
 
+/* ------------------------------- presets -------------------------------- */
+
+#[derive(Debug, Deserialize)]
+pub struct PresetName {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePresetPayload {
+    pub name: String,
+    /// Also store lead-in / clock / 报时器 settings with the playlist.
+    #[serde(default)]
+    pub include_settings: bool,
+}
+
+/// What presets exist (for the picker).
+pub async fn list_presets(State(_state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "presets": crate::presets::list() }))
+}
+
+/// One preset, in full — this is what "导出文件" downloads.
+pub async fn get_preset(
+    State(_state): State<Arc<AppState>>,
+    Query(q): Query<PresetName>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    match crate::presets::load(&q.name) {
+        Ok(p) => serde_json::to_value(p)
+            .map(Json)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
+        Err(e) => Err((StatusCode::NOT_FOUND, format!("{e:#}"))),
+    }
+}
+
+/// Save the current playlist as a preset. Re-using a name overwrites it, which
+/// is what "保存" means once you have edited a preset's schedule.
+pub async fn save_preset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<SavePresetPayload>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "请给预设起个名字".to_string()));
+    }
+    let preset = {
+        let cfg = state.config.read();
+        crate::presets::from_config(&cfg, &name, payload.include_settings)
+    };
+    let items = preset.items.len();
+    let path = crate::presets::save(&preset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    info!(
+        "preset saved: {} ({} items) -> {}",
+        name,
+        items,
+        path.display()
+    );
+    Ok(Json(json!({ "ok": true, "name": name, "items": items })))
+}
+
+/// Load a preset over the current playlist. Replace, never merge.
+pub async fn load_preset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<PresetName>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    let preset = crate::presets::load(&payload.name)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e:#}")))?;
+    let items = apply_preset(&state, preset);
+    let _ = state.notify.send(crate::NotifyKind::PlaylistChanged);
+    persist(state.config.clone()).await?;
+    info!("preset loaded: {} ({} items)", payload.name, items);
+    Ok(Json(
+        json!({ "ok": true, "name": payload.name, "items": items }),
+    ))
+}
+
+/// Take a preset that was read from a file the operator picked.
+pub async fn import_preset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(preset): Json<crate::presets::Preset>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    if preset.kind != crate::presets::KIND {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "这不是本插件的预设文件（可以在「导出文件」里看看正确格式）".to_string(),
+        ));
+    }
+    if preset.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "预设文件缺少名称".to_string()));
+    }
+    let items = preset.items.len();
+    crate::presets::save(&preset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(
+        json!({ "ok": true, "name": preset.name, "items": items }),
+    ))
+}
+
+pub async fn delete_preset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<PresetName>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    require_token(&state, &headers)?;
+    crate::presets::delete(&payload.name).map_err(|e| (StatusCode::NOT_FOUND, format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Swap the playlist for the preset's. Deliberately a replace: the whole point
+/// of a preset is to reproduce a known schedule exactly, and the UI says the
+/// current rows will be cleared first.
+fn apply_preset(state: &AppState, preset: crate::presets::Preset) -> usize {
+    let mut cfg = state.config.write();
+    cfg.playlist.items = preset.items;
+    cfg.playlist.bumpers = preset.bumpers;
+    if let Some(s) = preset.scheduler {
+        // Keep whatever arm state the channel is in: loading a schedule should
+        // not silently start or stop the broadcast.
+        let enabled = cfg.scheduler.enabled;
+        cfg.scheduler = s;
+        cfg.scheduler.enabled = enabled;
+    }
+    if let Some(c) = preset.clock {
+        cfg.clock = c;
+    }
+    cfg.playlist.items.len()
+}
+
 /// Ask the time servers *now* instead of waiting for the next interval — the
 /// button behind "立即授时" in the admin panel.
 pub async fn sync_time(

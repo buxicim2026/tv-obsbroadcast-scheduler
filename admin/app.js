@@ -14,6 +14,12 @@ const API = {
     start: '/api/scheduler/start',
     pause: '/api/scheduler/pause',
     timeSync: '/api/time/sync',
+    presets: '/api/presets',
+    presetOne: '/api/presets/one',
+    presetSave: '/api/presets/save',
+    presetLoad: '/api/presets/load',
+    presetImport: '/api/presets/import',
+    presetDelete: '/api/presets/delete',
     next: '/api/scheduler/next',
     reload: '/api/scheduler/reload',
     reorder: '/api/playlist/reorder',
@@ -83,6 +89,7 @@ window.addEventListener('DOMContentLoaded', () => {
         ['名称浮窗', setupPlaylistTooltip],
         ['主控台按钮', setupDashboardActions],
         ['节目表', setupPlaylistAdd],
+        ['播出预设', setupPresets],
         ['设置', setupSettings],
     ];
     for (const [label, fn] of steps) {
@@ -241,8 +248,10 @@ function renderDashboard(s) {
     document.getElementById('dash-program-meta').textContent =
         onAir ? `当前状态：${sch.scheduler_state}` : '等待调度器启动';
 
+    // 记下这次推送测到的剩余时间，之后由 tickClock 按真实时间平滑扣减。
+    noteRemaining(sch.current_remaining_ms);
     document.getElementById('dash-remaining').textContent =
-        formatRemaining(sch.current_remaining_ms);
+        formatRemaining(currentRemainingMs());
 
     const btn = document.getElementById('btn-armed');
     btn.textContent = sch.scheduler_running ? '停用自动播出' : '启用自动播出';
@@ -379,17 +388,33 @@ function renderConsole(s) {
     setText('ctl-info-nextcd', up ? fmtCountdown(up.start_at_ms - Date.now()) : '--:--:--');
 }
 
-/// 每秒走一次：主时钟 + 备播倒计时 + 当前剩余时间本地递减（WS 会校正）。
+/// 倒计时锚点：引擎每次推送都带来"那一刻还剩多少"，我们记下数值和收到的时间，
+/// 渲染时按真实经过的毫秒数扣减。
+///
+/// 以前是对同一个数字每 100ms 减 1000ms —— 降得比真实时间快十倍，然后被下一次
+/// 推送拉回去，数字于是忽大忽小（看起来"突然多出几毫秒"）。
+let remainingAnchor = { value: null, at: 0 };
+
+function noteRemaining(value) {
+    if (typeof value === 'number' && value >= 0) {
+        remainingAnchor = { value, at: Date.now() };
+    }
+}
+
+function currentRemainingMs() {
+    if (remainingAnchor.value == null) return null;
+    return Math.max(0, remainingAnchor.value - (Date.now() - remainingAnchor.at));
+}
+
 function tickClock() {
     // 主时钟显示本机时间：和调度器用的是同一个时钟，一眼就能对上。
     setText('ctl-clock', new Date().toLocaleTimeString('zh-CN', { hour12: false }));
     const up = upcomingProgram();
     setText('ctl-info-nextcd', up ? fmtCountdown(up.start_at_ms - Date.now()) : '--:--:--');
     const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
-    if (sch.scheduler_running && typeof sch.current_remaining_ms === 'number'
-        && sch.current_remaining_ms > 0) {
-        sch.current_remaining_ms = Math.max(0, sch.current_remaining_ms - 1000);
-        setText('dash-remaining', formatRemaining(sch.current_remaining_ms));
+    const remaining = currentRemainingMs();
+    if (sch.scheduler_running && remaining != null) {
+        setText('dash-remaining', formatRemaining(remaining));
     }
 }
 
@@ -794,6 +819,156 @@ async function addProgram(name, path, startAtMs, durationMs, kind) {
         declared_duration_ms: durationMs || 30 * 60 * 1000,
         kind: kind || 'primary',
     });
+}
+
+/* ------------------------------------------------------------- 播出预设 --- */
+// 整套节目表的保存 / 载入 / 导出 / 导入。载入是"清空并替换"，这正是迁移电脑
+// 或重装系统后要的效果：带上导出的 JSON，一键回到排好的节目表。
+
+function presetSelectedName() {
+    const sel = document.getElementById('preset-select');
+    return sel ? String(sel.value || '').trim() : '';
+}
+
+/// 刷新预设下拉。`selectName` 用于保存/导入后自动选中刚处理的那个。
+async function refreshPresets(selectName) {
+    const sel = document.getElementById('preset-select');
+    if (!sel) return;
+    try {
+        const r = await fetch(API.presets).then(x => x.json());
+        const list = r.presets || [];
+        sel.innerHTML = '';
+        if (!list.length) {
+            const o = document.createElement('option');
+            o.value = '';
+            o.textContent = '（还没有预设）';
+            sel.appendChild(o);
+            return;
+        }
+        for (const p of list) {
+            const o = document.createElement('option');
+            o.value = p.name;
+            o.textContent = `${p.name}（${p.items} 条 · ${msToHMS(p.total_ms)}）`;
+            sel.appendChild(o);
+        }
+        if (selectName && list.some(p => p.name === selectName)) sel.value = selectName;
+    } catch (_) {}
+}
+
+async function savePresetFromInput() {
+    const nameEl = document.getElementById('preset-name');
+    const name = nameEl ? String(nameEl.value || '').trim() : '';
+    if (!name) {
+        setPlaylistStatus('请先填写预设名称，再点「保存当前节目表」', 'err');
+        return;
+    }
+    const withSettings = !!(document.getElementById('preset-with-settings') || {}).checked;
+    setPlaylistStatus('正在保存预设…');
+    try {
+        const r = await apiPost(API.presetSave, { name, include_settings: withSettings });
+        setPlaylistStatus(`✅ 已保存预设「${r.name}」（${r.items} 条）`, 'ok');
+        log(`已保存预设「${r.name}」（${r.items} 条）`);
+        await refreshPresets(r.name);
+    } catch (e) {
+        setPlaylistStatus(`保存预设失败：${friendlyWriteError(e)}`, 'err');
+    }
+}
+
+async function loadSelectedPreset() {
+    const name = presetSelectedName();
+    if (!name) {
+        setPlaylistStatus('先在下拉里选一个预设', 'err');
+        return;
+    }
+    if (!window.confirm(`载入「${name}」会清空并替换当前节目表（当前内容不会自动保存）。\n\n继续？`)) {
+        return;
+    }
+    setPlaylistStatus('正在载入预设…');
+    try {
+        const r = await apiPost(API.presetLoad, { name });
+        setPlaylistStatus(`✅ 已载入预设「${r.name}」（${r.items} 条）`, 'ok');
+        log(`已载入预设「${r.name}」（${r.items} 条）`);
+        await refreshAll();
+    } catch (e) {
+        setPlaylistStatus(`载入预设失败：${friendlyWriteError(e)}`, 'err');
+    }
+}
+
+async function deleteSelectedPreset() {
+    const name = presetSelectedName();
+    if (!name) {
+        setPlaylistStatus('先在下拉里选一个预设', 'err');
+        return;
+    }
+    if (!window.confirm(`确定删除预设「${name}」？（只删预设文件，不影响当前节目表）`)) return;
+    try {
+        await apiPost(API.presetDelete, { name });
+        setPlaylistStatus(`已删除预设「${name}」`, 'ok');
+        await refreshPresets();
+    } catch (e) {
+        setPlaylistStatus(`删除预设失败：${friendlyWriteError(e)}`, 'err');
+    }
+}
+
+async function exportSelectedPreset() {
+    const name = presetSelectedName();
+    if (!name) {
+        setPlaylistStatus('先在下拉里选一个预设', 'err');
+        return;
+    }
+    try {
+        const r = await fetch(`${API.presetOne}?name=${encodeURIComponent(name)}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${name}.tvbs-preset.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        setPlaylistStatus(`已导出「${name}」，文件在浏览器下载目录里（换机器时带上它）`, 'ok');
+    } catch (e) {
+        setPlaylistStatus(`导出失败：${friendlyWriteError(e)}`, 'err');
+    }
+}
+
+async function importPresetFile(file) {
+    if (!file) return;
+    setPlaylistStatus('正在导入预设文件…');
+    try {
+        const data = JSON.parse(await file.text());
+        const r = await apiPost(API.presetImport, data);
+        setPlaylistStatus(`✅ 已导入预设「${r.name}」（${r.items} 条），点「载入」即可应用`, 'ok');
+        log(`已导入预设文件「${r.name}」`);
+        await refreshPresets(r.name);
+    } catch (e) {
+        setPlaylistStatus(`导入失败：${(e && e.message) || e}`, 'err');
+    }
+}
+
+function setupPresets() {
+    const bind = (id, fn) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', fn);
+    };
+    bind('preset-save', savePresetFromInput);
+    bind('preset-load', loadSelectedPreset);
+    bind('preset-delete', deleteSelectedPreset);
+    bind('preset-export', exportSelectedPreset);
+    bind('preset-import-btn', () => {
+        const input = document.getElementById('preset-import');
+        if (input) input.click();
+    });
+    const fileInput = document.getElementById('preset-import');
+    if (fileInput) {
+        fileInput.addEventListener('change', () => {
+            const f = fileInput.files && fileInput.files[0];
+            Promise.resolve(importPresetFile(f)).finally(() => { fileInput.value = ''; });
+        });
+    }
+    refreshPresets();
 }
 
 function setupPlaylistAdd() {
