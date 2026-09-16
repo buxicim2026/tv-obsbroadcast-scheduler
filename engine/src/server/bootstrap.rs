@@ -21,7 +21,12 @@ pub struct BootstrapPayload {
     pub port: u16,
     pub password: Option<String>,
     pub tls: bool,
-    pub target_input: String,
+    /// Omit (or send empty) to keep the current value. An empty `<select>` — the
+    /// settings page renders one whenever OBS isn't connected yet — used to save
+    /// an empty name over a working configuration, which then looked exactly
+    /// like "the plugin can't find my media source any more".
+    #[serde(default)]
+    pub target_input: Option<String>,
     /// Optional scheduler settings the admin panel can save in one call.
     #[serde(default)]
     pub scheduler: Option<SchedulerPatch>,
@@ -99,7 +104,13 @@ pub async fn bootstrap(
         cfg.obs_ws.port = payload.port;
         cfg.obs_ws.password = payload.password.clone();
         cfg.obs_ws.tls = payload.tls;
-        cfg.target_input = payload.target_input.clone();
+        // Never let an empty string wipe a working target source.
+        if let Some(t) = payload.target_input.as_ref() {
+            let t = t.trim();
+            if !t.is_empty() {
+                cfg.target_input = t.to_string();
+            }
+        }
         if let Some(s) = payload.scheduler {
             if let Some(v) = s.lead_in_ms {
                 cfg.scheduler.lead_in_ms = v;

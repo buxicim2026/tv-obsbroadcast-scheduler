@@ -152,9 +152,9 @@
                 <input type="file" id="media-file-input" accept="video/*,image/*" multiple hidden />
             </div>
 
-            <!-- 开播时间（北京时间） -->
+            <!-- 开播时间（本机时间） -->
             <div class="flex items-center gap-2 mt-3">
-                <label class="text-xs text-muted" for="schedule-start-at">开播时间（北京时间）</label>
+                <label class="text-xs text-muted" for="schedule-start-at">开播时间（本机时间）</label>
                 <input id="schedule-start-at" type="datetime-local" class="form-input" />
                 <button class="btn btn-secondary" id="btn-apply-start">⏱ 按开播时间重排</button>
                 <span class="text-muted text-xs">留空则点「开始自动播出」时以那一刻为基准，节目单自动顺延或提前。</span>
@@ -193,7 +193,7 @@
                 <button class="btn btn-secondary" id="btn-add-program">➕ 新增节目</button>
                 <span class="text-muted text-xs">（同样通过选择文件添加，不需要手填名称与路径）</span>
             </div>
-            <p class="text-muted text-xs mt-3">提示：导入后立即写入引擎配置。播出时间按北京时间显示。</p>
+            <p class="text-muted text-xs mt-3">提示：导入后立即写入引擎配置。播出时间按本机时间显示。</p>
         </div>
     </section>
 
@@ -223,7 +223,8 @@
                         <select class="form-input w-full" id="cfg-target-input"></select>
                         <button class="btn btn-secondary" id="cfg-refresh-inputs" type="button">刷新</button>
                     </div>
-                    <span class="text-muted text-xs">列表直接来自 OBS；为空说明 OBS 未连接或 WebSocket 未启用。</span>
+                    <span class="text-muted text-xs">列表直接来自 OBS；为空白说明 OBS 未连接或 WebSocket 未启用（此时保存不会清除已有设置）。</span>
+                    <div class="text-xs mt-1" id="cfg-target-effective"></div>
                     <label class="form-label mt-3 block">Lead-in（毫秒）</label>
                     <input class="form-input w-full" id="cfg-lead-in" type="number" />
                     <label class="form-label mt-3 block">时钟偏移（毫秒）</label>

@@ -35,28 +35,31 @@ const PROGRAM_KINDS = [
 ];
 const PROGRAM_KIND_LABEL = Object.fromEntries(PROGRAM_KINDS);
 
-/// 北京时间显示（播出时间一律按北京时间呈现）。
-function fmtBeijing(ms) {
+/// 北京时间显示（播出时间一律按本机时间呈现）。
+/// 本机时间显示。调度器判定节目窗口用的就是本机时钟，所以界面显示也一律用本机时间，
+/// 不做任何时区换算 —— 否则机器时区不是东八区时，"看到的播出时间"和"引擎判定的
+/// 时间"就对不上。调度器判定节目窗口用的就是本机时钟，所以界面显示也一律用
+/// 本机时间，不做任何时区换算 —— 否则机器时区一旦不是东八区，"看到的播出时间"
+/// 和"引擎判定的时间"就对不上，节目看起来就是不触发。
+function fmtLocal(ms) {
     if (ms == null) return '—';
     try {
         return new Date(ms).toLocaleString('zh-CN', {
-            timeZone: 'Asia/Shanghai',
             hour12: false,
             year: 'numeric', month: '2-digit', day: '2-digit',
             hour: '2-digit', minute: '2-digit', second: '2-digit',
         });
     } catch (_) {
-        return new Date(ms).toLocaleString();
+        return new Date(ms).toString();
     }
 }
 
-/// 把 <input type="datetime-local"> 的值当作**北京时间**解析成 epoch ms。
-function parseBeijingInput(v) {
+/// 把 <input type="datetime-local"> 的值按**本机时间**解析成 epoch ms。
+function parseLocalInput(v) {
     if (!v) return null;
     const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(v));
     if (!m) return null;
-    // UTC = 北京时间 - 8h
-    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5]);
+    return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0, 0).getTime();
 }
 
 let ws = null;
@@ -316,7 +319,7 @@ function renderConsole(s) {
                     `<td class="ctl-name" title="${escapeHtml(p.file_path)}">${escapeHtml(p.name)}</td>` +
                     `<td>${PROGRAM_KIND_LABEL[p.kind] || p.kind}</td>` +
                     `<td class="ctl-mono">${msToHMS(durMs)}</td>` +
-                    `<td class="ctl-mono">${fmtBeijing(p.start_at_ms)}</td>` +
+                    `<td class="ctl-mono">${fmtLocal(p.start_at_ms)}</td>` +
                     `<td class="ctl-state">${label}</td>`;
                 tbody.appendChild(tr);
             });
@@ -378,9 +381,8 @@ function renderConsole(s) {
 
 /// 每秒走一次：主时钟 + 备播倒计时 + 当前剩余时间本地递减（WS 会校正）。
 function tickClock() {
-    setText('ctl-clock', new Date().toLocaleTimeString('zh-CN', {
-        hour12: false, timeZone: 'Asia/Shanghai',
-    }));
+    // 主时钟显示本机时间：和调度器用的是同一个时钟，一眼就能对上。
+    setText('ctl-clock', new Date().toLocaleTimeString('zh-CN', { hour12: false }));
     const up = upcomingProgram();
     setText('ctl-info-nextcd', up ? fmtCountdown(up.start_at_ms - Date.now()) : '--:--:--');
     const sch = (lastSnapshot && (lastSnapshot.scheduler || lastSnapshot.status)) || {};
@@ -519,14 +521,16 @@ async function toggleArmed() {
             // Refuse to arm into a state that cannot possibly play, with the
             // reason spelled out (missing/incorrect target source is by far the
             // most common cause of "nothing happens").
+            // 这一步只提醒、不再拦截。以前它会直接中断启用：OBS 刚启动还没
+            // 连上、或名字稍后才改，用户就会看到"点了没反应、按钮弹回去"。
+            // 现在照常启用，真有问题由引擎报错并显示在主控台。
             const check = await checkTargetInput();
             if (!check.ok) {
-                log(check.message);
-                setPlaylistStatus(check.message, 'err');
+                log(`提醒（不影响启用）：${check.message}`);
                 showDashError(check.message);
-                return;
+            } else {
+                dashErrorOverride = null;
             }
-            dashErrorOverride = null;
             // Arming re-bases the list on *this* moment: later than planned ->
             // everything 顺延; earlier -> everything 提前. No manual fixups.
             await apiPost(API.start, {
@@ -658,7 +662,7 @@ async function runDiagnostics() {
         const now = Date.now();
         const pending = items.filter(p => p.start_at_ms > now);
         lines.push(`节目单：待播 ${pending.length} 条`
-            + (pending.length ? `，首条 ${fmtBeijing(pending[0].start_at_ms)}` : ''));
+            + (pending.length ? `，首条 ${fmtLocal(pending[0].start_at_ms)}` : ''));
         if (!pending.length) {
             bad.push('节目单里所有节目的播出时间都已过去：点「启用自动播出」会按当前时刻重排，然后再试');
         }
@@ -738,7 +742,10 @@ function friendlyWriteError(e) {
 /// same timestamp and the scheduler played them all at once.
 function nextStartAt(durationMs) {
     const dur = durationMs || 30 * 60 * 1000;
-    let start = Date.now() + 60_000;
+    // 5s, not a minute: importing a file and then pressing "启用自动播出" should
+    // put something on screen right away. Waiting 60 seconds made a working
+    // setup look broken.
+    let start = Date.now() + 5_000;
     if (playlistCache.length) {
         const last = playlistCache[playlistCache.length - 1];
         const lastEnd = (last.start_at_ms || 0) + (last.declared_duration_ms || 0);
@@ -878,14 +885,14 @@ function setupPlaylistAdd() {
         });
     }
 
-    // 开播时间（北京时间）→ 按该时刻重排整张节目单
+    // 开播时间（本机时间）→ 按该时刻重排整张节目单
     const applyStartBtn = document.getElementById('btn-apply-start');
     if (applyStartBtn) {
         applyStartBtn.addEventListener('click', async () => {
             const raw = (document.getElementById('schedule-start-at') || {}).value || '';
-            const base = parseBeijingInput(raw);
+            const base = parseLocalInput(raw);
             if (base == null) {
-                setPlaylistStatus('请先选择开播时间（按北京时间填写）', 'err');
+                setPlaylistStatus('请先选择开播时间（按本机时间填写）', 'err');
                 return;
             }
             setPlaylistStatus('正在按开播时间重排…');
@@ -1407,7 +1414,7 @@ function renderPlaylistRows() {
                 </select>
             </td>
             <td class="py-2 pr-2 font-mono text-xs">${msToHMS(durMs)}</td>
-            <td class="py-2 pr-2 font-mono text-xs">${fmtBeijing(p.start_at_ms)}</td>
+            <td class="py-2 pr-2 font-mono text-xs">${fmtLocal(p.start_at_ms)}</td>
             <td class="py-2 pr-2 text-xs ${stateClass}">${stateLabel}</td>
             <td class="py-2 pr-2 text-right">
                 <button class="btn btn-link" data-act="up" data-id="${p.id}"
@@ -1555,7 +1562,7 @@ function renderNtpStatus(ntp) {
         return;
     }
     const sign = ntp.offset_ms >= 0 ? '+' : '';
-    const when = ntp.synced_at ? `｜${fmtBeijing(new Date(ntp.synced_at).getTime())}` : '';
+    const when = ntp.synced_at ? `｜${fmtLocal(new Date(ntp.synced_at).getTime())}` : '';
     el.textContent = `${ntp.server || '已授时'}｜偏差 ${sign}${ntp.offset_ms}ms${when}`;
 }
 
@@ -1736,6 +1743,15 @@ function renderSettingsForm() {
     const tlsEl = document.getElementById('cfg-tls');
     if (tlsEl && active && active.id !== 'cfg-tls') tlsEl.checked = !!cfgObs.tls;
     setVal('cfg-target-input', snap.target_input || (snap.config && snap.config.target_input) || '');
+    // 把"引擎现在到底在用哪个源"直接写出来：选完保存后能一眼确认有没有存进去。
+    const effEl = document.getElementById('cfg-target-effective');
+    if (effEl) {
+        const eff = snap.target_input || (snap.config && snap.config.target_input) || '';
+        effEl.textContent = eff
+            ? `当前生效：${eff} ✓`
+            : '当前生效：（尚未设置 —— 播出时不会有画面，请从上方下拉选择后保存）';
+        effEl.className = 'text-xs mt-1 ' + (eff ? 'text-emerald-400' : 'text-red');
+    }
     const sc = snap.scheduler_cfg || (snap.config && snap.config.scheduler) || {};
     setVal('cfg-lead-in', sc.lead_in_ms != null ? sc.lead_in_ms : 200);
     setVal('cfg-clock-offset', sc.clock_offset_ms != null ? sc.clock_offset_ms : 0);
@@ -1772,13 +1788,14 @@ function renderSettingsForm() {
 
 async function saveCfg() {
     const token = engineToken();
+    const targetEl = document.getElementById('cfg-target-input');
+    const targetVal = targetEl ? String(targetEl.value || '').trim() : '';
     const payload = {
         bootstrap_token: token,
         host: document.getElementById('cfg-host').value,
         port: parseInt(document.getElementById('cfg-port').value, 10) || 4455,
         password: document.getElementById('cfg-password').value,
         tls: document.getElementById('cfg-tls').checked,
-        target_input: document.getElementById('cfg-target-input').value,
         scheduler: {
             lead_in_ms: parseInt(document.getElementById('cfg-lead-in').value, 10) || 200,
             clock_offset_ms: parseInt(document.getElementById('cfg-clock-offset').value, 10) || 0,
@@ -1801,12 +1818,16 @@ async function saveCfg() {
             interval_min: parseInt(document.getElementById('cfg-ntp-interval').value, 10) || 30,
         },
     };
-    const status = document.getElementById('cfg-status');
-    if (!document.getElementById('cfg-target-input').value) {
-        // Not a hard error — the operator may be fixing credentials while OBS is
-        // down — but an empty target is the classic "nothing ever plays".
-        log('提示：受控媒体源还没选，播出时不会有画面（到设置页从下拉里选一个媒体源）');
+    // Only send a target source when one was really picked. An empty <select>
+    // (which is what you get while OBS isn't connected) used to be submitted as
+    // "" and wiped a perfectly good configuration — the plugin then looked like
+    // it "couldn't recognise" the media source any more.
+    if (targetVal) {
+        payload.target_input = targetVal;
+    } else {
+        log('受控媒体源这一栏是空的，已保留原来设置（不会清除）。OBS 未连接时请先连上再选。');
     }
+    const status = document.getElementById('cfg-status');
     status.textContent = '保存中…';
     try {
         const res = await fetch('/api/bootstrap', {
