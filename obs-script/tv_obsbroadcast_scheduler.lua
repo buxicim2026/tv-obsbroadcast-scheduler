@@ -316,7 +316,8 @@ end
 -- 画面的 source 只会污染『添加来源』列表、让用户找不到该选什么。
 
 function script_description()
-  return "TV Broadcast Scheduler —— 让一个媒体源按节目表毫秒级自动硬切。\n\n"
+  -- 中文名 + 英文标识并列：OBS 的脚本列表在任何语言环境下都看得懂。
+  return "电视塔 (tv-obsbroadcast-scheduler) —— 让一个媒体源按节目表毫秒级自动硬切。\n\n"
     .. "填写 obs-websocket 凭据与目标媒体源即可，不需要往场景里添加来源。\n"
     .. "面板：Admin UI http://" .. ENGINE_HOST .. ":" .. ENGINE_PORT .. "/admin"
 end

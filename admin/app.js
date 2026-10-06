@@ -41,6 +41,33 @@ const PROGRAM_KINDS = [
 ];
 const PROGRAM_KIND_LABEL = Object.fromEntries(PROGRAM_KINDS);
 
+/* -------------------------------------------------------------------------- */
+/* 品牌与版本                                                                  */
+/* -------------------------------------------------------------------------- */
+
+// 中文系统显示中文名「电视塔」，其它语言保持原来的英文标识 —— 品牌名只在
+// 中文环境替换，英文环境的表现和以前完全一致。
+const APP_NAME_ZH = '电视塔';
+const APP_NAME_EN = 'tv-obsbroadcast-scheduler';
+const APP_VERSION = 'v0.0.2';
+
+function isChineseLocale() {
+    const list = [navigator.language, ...(navigator.languages || [])].filter(Boolean);
+    return list.some(l => /^zh(-|$)/i.test(l));
+}
+
+function applyBranding() {
+    const zh = isChineseLocale();
+    document.title = zh ? `${APP_NAME_ZH} · ${APP_NAME_EN}` : APP_NAME_EN;
+    const nameEl = document.getElementById('app-name');
+    if (nameEl) nameEl.textContent = zh ? APP_NAME_ZH : APP_NAME_EN;
+    // 中文时把英文标识作为副标题留在旁边，方便对照文档与日志。
+    const slugEl = document.getElementById('app-slug');
+    if (slugEl) slugEl.textContent = zh ? APP_NAME_EN : '';
+    const verEl = document.getElementById('app-version');
+    if (verEl) verEl.textContent = `${APP_VERSION} · ${zh ? APP_NAME_ZH : APP_NAME_EN}`;
+}
+
 /// 北京时间显示（播出时间一律按本机时间呈现）。
 /// 本机时间显示。调度器判定节目窗口用的就是本机时钟，所以界面显示也一律用本机时间，
 /// 不做任何时区换算 —— 否则机器时区不是东八区时，"看到的播出时间"和"引擎判定的
@@ -81,6 +108,9 @@ let bumpersCache = [];
 /* -------------------------------------------------------------------------- */
 
 window.addEventListener('DOMContentLoaded', () => {
+    // 品牌先落地：即使后面某一步抛错，标题栏也不会留着占位文字。
+    try { applyBranding(); } catch (_) {}
+
     // Each wiring step is isolated on purpose: if one of them throws, the
     // rest of the console must still work. Previously a single failure here
     // aborted the whole boot and left every button looking dead.

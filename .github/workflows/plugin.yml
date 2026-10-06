@@ -91,4 +91,6 @@ jobs:
           files: artifacts/**/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ startsWith(github.ref, 'refs/tags/v0.') || contains(github.ref_name, '-') }}
+          # v0.0.2 is the first proper release: only tags that carry a
+          # pre-release suffix (e.g. v0.0.3-rc1) are published as pre-releases now.
+          prerelease: ${{ contains(github.ref_name, '-') }}
