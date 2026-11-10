@@ -13,8 +13,9 @@
 //!   * GetMediaInputStatus
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -34,6 +35,15 @@ use crate::config::ObsWsConfig;
 /// Concrete stream type produced by `connect_async` (plain TCP for ws://,
 /// TLS for wss:// — the enum hides the difference).
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Max time an RPC may wait for its RequestResponse. OBS can stall while
+/// re-opening a decoder; without a deadline the scheduler tick (and therefore
+/// the whole broadcast) hangs forever on a half-open TCP connection.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// No Pong (and no other inbound frame) for this long => treat as dead.
+const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(15);
 
 /// How a resolved response is handed back to its awaiting caller.
 enum Pending {
@@ -77,6 +87,12 @@ pub struct ObsWsClient {
     /// Signalled when the background socket task ends, so the connector can
     /// reconnect immediately instead of polling blindly.
     closed: Arc<Notify>,
+    /// Set *before* `closed` is notified. `notify_waiters()` used to lose the
+    /// wakeup when the socket died between `handle.set()` and `closed().await`,
+    /// which left the connector asleep forever with `obs_connected == true`.
+    dead: Arc<AtomicBool>,
+    /// Lets a timed-out RPC tear the socket down and force a reconnect.
+    shutdown: Arc<Notify>,
 }
 
 impl ObsWsClient {
@@ -88,8 +104,9 @@ impl ObsWsClient {
             format!("ws://{}:{}/", cfg.host, cfg.port)
         };
 
-        let (mut ws, _resp) = connect_async(url.as_str())
+        let (mut ws, _resp) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_async(url.as_str()))
             .await
+            .map_err(|_| anyhow!("connect to obs websocket at {url} timed out"))?
             .with_context(|| format!("connect to obs websocket at {url}"))?;
 
         // Handshake: Hello (op 0) -> Identify (op 1) -> Identified (op 2).
@@ -114,15 +131,51 @@ impl ObsWsClient {
             cmd_tx,
             next_id: Arc::new(Mutex::new(1)),
             closed: Arc::new(Notify::new()),
+            dead: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(Notify::new()),
         });
         client.spawn(cmd_rx, ws);
         Ok(client)
     }
 
     /// Resolves once the background socket task has ended (OBS closed the
-    /// connection, a fatal protocol error, or OBS restarted).
+    /// connection, a fatal protocol error, a timed-out RPC, or OBS restarted).
+    ///
+    /// Registering `notified()` before checking the flag closes the race with
+    /// the socket task: `notify_one()` stores a permit, and if the task already
+    /// finished before we got here, `dead` is already true.
     pub async fn closed(&self) {
-        self.closed.notified().await;
+        let notified = self.closed.notified();
+        if self.dead.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+
+    /// Force the socket task down. Called when an RPC times out: OBS answered
+    /// neither the request nor a Close frame, so waiting longer cannot help.
+    pub fn abort(&self) {
+        self.shutdown.notify_one();
+    }
+
+    /// Wait for an RPC response, but never forever.
+    async fn await_response<T>(
+        &self,
+        rx: oneshot::Receiver<Result<T>>,
+        what: &'static str,
+    ) -> Result<T> {
+        match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow!("{what} response dropped")),
+            Err(_) => {
+                warn!(
+                    "{what} timed out after {:?}; dropping obs-websocket connection",
+                    RESPONSE_TIMEOUT
+                );
+                self.abort();
+                Err(anyhow!("{what} timed out after {:?}", RESPONSE_TIMEOUT))
+            }
+        }
     }
 
     fn alloc_id(&self) -> u64 {
@@ -154,8 +207,7 @@ impl ObsWsClient {
             resp: tx,
         })
         .await?;
-        rx.await
-            .map_err(|_| anyhow!("set_input_settings response dropped"))?
+        self.await_response(rx, "set_input_settings").await
     }
 
     /// Send an action to a Media Source (restart / pause / play / ...).
@@ -171,8 +223,7 @@ impl ObsWsClient {
             resp: tx,
         })
         .await?;
-        rx.await
-            .map_err(|_| anyhow!("trigger_media_input_action response dropped"))?
+        self.await_response(rx, "trigger_media_input_action").await
     }
 
     /// Read Media Source status (state, duration ms, cursor ms).
@@ -183,8 +234,7 @@ impl ObsWsClient {
             resp: tx,
         })
         .await?;
-        rx.await
-            .map_err(|_| anyhow!("get_media_input_status response dropped"))?
+        self.await_response(rx, "get_media_input_status").await
     }
 
     /// List every input OBS currently has (name + kind). Lets the admin offer
@@ -193,16 +243,14 @@ impl ObsWsClient {
     pub async fn get_input_list(&self) -> Result<Vec<InputInfo>> {
         let (tx, rx) = oneshot::channel();
         self.call(ObsWsCmd::GetInputList { resp: tx }).await?;
-        rx.await
-            .map_err(|_| anyhow!("get_input_list response dropped"))?
+        self.await_response(rx, "get_input_list").await
     }
 
     /// Query OBS version (used by /healthz and the admin banner).
     pub async fn get_version(&self) -> Result<ObsVersion> {
         let (tx, rx) = oneshot::channel();
         self.call(ObsWsCmd::GetVersion { resp: tx }).await?;
-        rx.await
-            .map_err(|_| anyhow!("get_version response dropped"))?
+        self.await_response(rx, "get_version").await
     }
 
     /// Configuration snapshot (useful for reconnect logic).
@@ -217,15 +265,23 @@ impl ObsWsClient {
         let next_id = self.next_id.clone();
         let pending_recv = pending.clone();
         let closed = self.closed.clone();
+        let dead = self.dead.clone();
+        let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
+            let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_rx = Instant::now();
+            let mut awaiting_pong = false;
             loop {
                 tokio::select! {
-                    biased;
-
+                    // Fair polling (no `biased`): while OBS keeps pushing event
+                    // frames, inbound reads used to starve outbound cut commands.
                     // ---- inbound frames -------------------------------------
                     incoming = ws.next() => {
                         let Some(frame) = incoming else { break };
+                        last_rx = Instant::now();
+                        awaiting_pong = false;
                         match frame {
                             Ok(Message::Text(txt)) => {
                                 let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue };
@@ -286,8 +342,10 @@ impl ObsWsClient {
                             ObsWsCmd::GetMediaInputStatus { input_name, .. } => json!({
                                 "inputName": input_name
                             }),
-                            ObsWsCmd::GetVersion { .. } => Value::Null,
-                            ObsWsCmd::GetInputList { .. } => Value::Null,
+                            // `requestData` must be an object in obs-websocket
+                            // v5; `null` is rejected as a bad field type.
+                            ObsWsCmd::GetVersion { .. } => json!({}),
+                            ObsWsCmd::GetInputList { .. } => json!({}),
                         };
                         // Register before sending so a fast reply can't race us.
                         match cmd {
@@ -321,6 +379,25 @@ impl ObsWsClient {
                             break;
                         }
                     }
+
+                    // ---- heartbeat -----------------------------------------
+                    // Only way to notice a half-open TCP connection: OBS is
+                    // gone but neither EOF nor an error ever arrives.
+                    _ = heartbeat.tick() => {
+                        if awaiting_pong && last_rx.elapsed() > HEARTBEAT_DEAD_AFTER {
+                            warn!("obs-websocket heartbeat timed out; reconnecting");
+                            break;
+                        }
+                        if last_rx.elapsed() >= HEARTBEAT_INTERVAL {
+                            if ws.send(Message::Ping(Default::default())).await.is_err() {
+                                break;
+                            }
+                            awaiting_pong = true;
+                        }
+                    }
+
+                    // ---- forced shutdown after an RPC timeout ---------------
+                    _ = shutdown.notified() => break,
                 }
             }
             // Socket/task ended. Fail every request still awaiting a reply,
@@ -332,7 +409,11 @@ impl ObsWsClient {
                     fail_pending(entry, "obs websocket connection closed".to_string());
                 }
             }
-            closed.notify_waiters();
+            // `notify_waiters()` does NOT store a permit. If the socket died
+            // between `handle.set()` and `closed().await`, the wakeup was lost
+            // and the connector slept forever with `obs_connected == true`.
+            dead.store(true, Ordering::Release);
+            closed.notify_one();
         });
     }
 }
@@ -435,7 +516,11 @@ fn fail_pending(entry: Pending, msg: String) {
 
 async fn send_msg(ws: &mut WsStream, payload: Value) -> Result<()> {
     let s = serde_json::to_string(&payload)?;
-    ws.send(Message::Text(s)).await?;
+    // A stalled OBS with a full TCP window used to block this send forever,
+    // which in turn blocked the socket task and every queued RPC.
+    tokio::time::timeout(RESPONSE_TIMEOUT, ws.send(Message::Text(s)))
+        .await
+        .map_err(|_| anyhow!("obs websocket write timed out"))??;
     Ok(())
 }
 
@@ -445,9 +530,9 @@ async fn send_op(ws: &mut WsStream, op: u8, d: Value) -> Result<()> {
 
 async fn recv_op(ws: &mut WsStream, expected_op: u8) -> Result<Value> {
     loop {
-        let msg = ws
-            .next()
+        let msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, ws.next())
             .await
+            .map_err(|_| anyhow!("obs websocket handshake timed out"))?
             .ok_or_else(|| anyhow!("ws closed during handshake"))??;
         if let Message::Text(txt) = msg {
             let v: Value = serde_json::from_str(&txt)?;
@@ -496,8 +581,3 @@ fn compute_auth(challenge: &str, salt: &str, password: &str) -> String {
     h2.update(challenge.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(h2.finalize())
 }
-
-/// Used only to keep the `Duration` import meaningful if the timeout helpers
-/// are reintroduced; harmless otherwise.
-#[allow(dead_code)]
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);

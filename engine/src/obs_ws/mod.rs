@@ -31,6 +31,11 @@ use tracing::{info, warn};
 
 use crate::config::ObsWsConfig;
 
+/// Cooldown after a *successful* connection drops. The backoff below only
+/// applies to failed connects; without this, an OBS that accepts and
+/// immediately closes sockets gets a connect storm.
+const RECONNECT_COOLDOWN_MS: u64 = 500;
+
 /// Construct a connected, authenticated client. `ObsWsClient::connect` spawns
 /// the background receive loop itself, so there is nothing else to wire up
 /// here. Returns a handle the scheduler and admin endpoints share.
@@ -106,6 +111,7 @@ pub async fn resilient_connector(cfg: ObsWsConfig, handle: ClientHandle, state: 
                     st.obs_error = Some("obs websocket disconnected".to_string());
                 }
                 warn!("obs-websocket disconnected; reconnecting");
+                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_COOLDOWN_MS)).await;
             }
             Err(e) => {
                 warn!(

@@ -320,7 +320,19 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
         }
-        let tmp = with_extension(path, "json.tmp");
+        // Every writer used to share the same `config.json.tmp`. With the
+        // bridge poller, the API and the scheduler all saving concurrently,
+        // one writer could overwrite another's temp file: a rename then
+        // installed half-written JSON (or failed because the temp was gone).
+        // Give each save its own temp name.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let suffix = format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let tmp = with_extension(path, &suffix);
         fs::write(&tmp, &data).with_context(|| format!("write tmp {}", tmp.display()))?;
         fs::rename(&tmp, path)
             .with_context(|| format!("rename tmp {} -> {}", tmp.display(), path.display()))?;

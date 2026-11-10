@@ -79,7 +79,11 @@ pub fn settings_payload(file_path: &str) -> serde_json::Value {
         "close_when_inactive": false,
         "linear_alpha": 0,
         "speed_percent": 100,
-        "clear_on_media_end": true,
+        // Keep the last frame when a file ends. With `true`, OBS clears the
+        // texture on ENDED/STOPPED — and because this is the channel's ONLY
+        // video source, that is a black screen during every switch, at the end
+        // of the playlist, and while a missing file is being skipped.
+        "clear_on_media_end": false,
     })
 }
 

@@ -15,13 +15,12 @@
 //! behind an `Arc`. Every transition writes the machine *and* mirrors the
 //! human-readable label into `AppStatus` for the UI.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -31,12 +30,10 @@ use crate::ControlCommand;
 
 const TICK_MS: u64 = 50;
 
-/// How long to wait between re-pointing the media source at a new file and
-/// telling it to play. OBS re-opens the decoder asynchronously; firing RESTART
-/// in the same instant hit a source that was still swapping files, so the
-/// action was dropped and the channel went black while the UI already showed
-/// the next programme. 300ms is comfortably above the swap on a local SSD.
-const SWITCH_SETTLE_MS: u64 = 300;
+/// Small grace period after a watchdog repair re-points the source. OBS applies
+/// `SetInputSettings` synchronously, so this only needs to cover the decoder's
+/// own async open — a full 300ms here used to add a third of a second of black.
+const SWITCH_SETTLE_MS: u64 = 40;
 
 /// Watchdog throttle: check what OBS is actually doing about once a second.
 static LAST_WATCHDOG_MS: AtomicI64 = AtomicI64::new(0);
@@ -53,9 +50,20 @@ static LAST_DISCONNECT_WARN: AtomicI64 = AtomicI64::new(0);
 static LAST_CUT_WARN: AtomicI64 = AtomicI64::new(0);
 
 /// How long to wait for OBS to finish opening the new file before starting it
-/// anyway, and how often to ask.
-const SWITCH_READY_TIMEOUT_MS: u64 = 1_500;
-const SWITCH_POLL_MS: u64 = 100;
+/// anyway, and how often to ask. This is a *short* grace period: `cut_to`
+/// stops the source first, so OBS will never report PLAYING here (see the
+/// comment in `cut_to`). The old 1500ms/100ms loop therefore always timed out.
+const SWITCH_READY_TIMEOUT_MS: u64 = 250;
+const SWITCH_POLL_MS: u64 = 25;
+
+/// Bumped on every completed cut. Confirmation tasks are spawned with the
+/// generation they belong to and refuse to touch OBS once a newer cut has
+/// happened — otherwise a delayed 1.5s check re-points the single Media Source
+/// at the *previous* programme's file and the picture jumps backwards.
+static CUT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Throttle for "the schedule ran out" (once per 5s instead of 20x/s).
+static LAST_EXHAUSTED_WARN: AtomicI64 = AtomicI64::new(0);
 
 /// Throttle for the "program vanished from the playlist" warning: without it
 /// the scheduler emitted ~20 identical warnings per second forever.
@@ -289,21 +297,45 @@ impl Scheduler {
                 st.scheduler_state = machine.label().to_string();
             }
 
-            // Auto-recover from a sticky error. `SchedulerState::Error` had no
-            // clearing endpoint, so a single transient failure (missing file,
-            // one failed RPC) froze the broadcast forever with no way back
-            // except restarting the engine.
+            // Auto-recover from a sticky error. Resetting straight to Idle was
+            // worse than the freeze it fixed: the very next tick calls
+            // `cut_to`, whose first action is STOP, so a persistent OBS problem
+            // produced a black flash every 10 seconds. Instead re-anchor the
+            // state machine to the on-air row WITHOUT touching OBS at all.
             if matches!(machine, SchedulerState::Error { .. }) {
                 let now = Utc::now().timestamp_millis();
                 let since = *error_since.get_or_insert(now);
-                if now - since > 10_000 {
-                    warn!("scheduler stuck in Error for >10s; resetting to Idle");
-                    machine = SchedulerState::Idle;
+                if now - since > 30_000 {
+                    warn!("scheduler stuck in Error for >30s; re-anchoring without touching OBS");
+                    let anchor = crate::playlist::current_program(&cfg_snapshot, now)
+                        .or_else(|| cfg_snapshot.playlist.items.last());
+                    match anchor {
+                        Some(p) => {
+                            let end = crate::playlist::end_at_ms(p).max(now.saturating_add(1_000));
+                            self.transition_to_playing(
+                                &state,
+                                &p.id,
+                                &p.name,
+                                end.saturating_sub(now),
+                                now,
+                                end,
+                                &mut machine,
+                            );
+                        }
+                        None => {
+                            machine = SchedulerState::Idle;
+                        }
+                    }
+                    // Leave `prev_active` alone: the status-mirroring code
+                    // below notices the Idle -> Playing change and updates
+                    // `scheduler_running` for the UI.
                     error_since = None;
                     let mut st = state.status.write();
-                    st.scheduler_running = false;
-                    st.scheduler_state = "Idle".to_string();
-                    prev_active = false;
+                    st.last_error = Some(
+                        "调度器曾进入错误状态，已在不打断播出的前提下自动恢复；\
+                         若画面仍异常，请在主控台点「重新载入」"
+                            .to_string(),
+                    );
                 }
             } else {
                 error_since = None;
@@ -667,7 +699,11 @@ impl Scheduler {
                 // thinks is on air. This is what recovers a black screen after
                 // a switch, and it also cuts on early when a file is shorter
                 // than its declared duration.
-                if into_program_ms > 2_000 {
+                // Stay out of the way of the 1.5s (+1.2s retry) playback
+                // confirmation: both of them can re-point the source, and a
+                // collision here used to produce a second unexpected restart
+                // right after a successful cut.
+                if into_program_ms > 3_000 {
                     self.watchdog(cfg, p, into_program_ms, machine).await;
                 }
 
@@ -768,8 +804,15 @@ impl Scheduler {
                             }
                         },
                         None => {
-                            // Schedule ended; loop in Idle until user re-arms.
-                            info!("schedule exhausted past {}", p.name);
+                            // Schedule ended. `clear_on_media_end` is now off,
+                            // so OBS keeps the final frame instead of blanking
+                            // the channel's only source while we wait for the
+                            // operator to re-arm.
+                            let now = Utc::now().timestamp_millis();
+                            if now - LAST_EXHAUSTED_WARN.load(Ordering::Relaxed) > 5_000 {
+                                LAST_EXHAUSTED_WARN.store(now, Ordering::Relaxed);
+                                info!("schedule exhausted past {}; holding last frame", p.name);
+                            }
                             self.become_idle(state, machine);
                         }
                     }
@@ -831,6 +874,13 @@ impl Scheduler {
                         end_at,
                         machine,
                     );
+                    // obs-websocket has no arbitrary seek, so the primary
+                    // really is back at frame 0 and its slot now ends at
+                    // `end_at`. Slide all following rows to start there —
+                    // otherwise their untouched `start_at_ms` no longer
+                    // matches what is on air and the scheduler either arms
+                    // into a black gap or skips the next programme.
+                    self.resequence_after(state, &p.id, end_at);
                 } else {
                     self.refresh_remaining(state, p, bumper_end_ms.saturating_sub(now_ms));
                 }
@@ -1031,6 +1081,9 @@ impl Scheduler {
             "watchdog: source '{}' is {} {}ms into '{}'; re-applying the file and restarting",
             target, s.media_state, into_ms, p.name
         );
+        // This is a cut too: invalidate confirmation tasks still sleeping, so
+        // they cannot re-apply their (older) file after this repair.
+        CUT_GENERATION.fetch_add(1, Ordering::SeqCst);
         let _ = client
             .set_input_settings(
                 &target,
@@ -1053,8 +1106,9 @@ impl Scheduler {
         let fpath = p.file_path.clone();
         let st = state.clone();
         let pname = p.name.clone();
+        let generation = CUT_GENERATION.load(Ordering::SeqCst);
         tokio::spawn(async move {
-            Scheduler::confirm_playback(obs, input, fpath, st, pname).await;
+            Scheduler::confirm_playback(obs, input, fpath, st, pname, generation).await;
         });
     }
 
@@ -1158,8 +1212,19 @@ impl Scheduler {
         file_path: String,
         state: crate::AppState,
         program_name: String,
+        generation: u64,
     ) {
         tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        // A newer cut (Next / bumper / watchdog repair) happened while we
+        // slept. Writing now would re-point the source at this task's stale
+        // file and make the picture jump backwards.
+        if CUT_GENERATION.load(Ordering::SeqCst) != generation {
+            debug!(
+                "playback confirm for '{}' dropped: a newer cut took over",
+                program_name
+            );
+            return;
+        }
         let Some(client) = obs.current() else { return };
 
         let is_playing = |s: &str| {
@@ -1185,6 +1250,10 @@ impl Scheduler {
                     "'{}' did not start on '{}' (mediaState={}); retrying the cut once",
                     program_name, target_input, s.media_state
                 );
+                if CUT_GENERATION.load(Ordering::SeqCst) != generation {
+                    debug!("skipping confirmation retry: a newer cut took over");
+                    return;
+                }
                 let _ = client
                     .set_input_settings(
                         &target_input,
@@ -1237,16 +1306,18 @@ impl Scheduler {
 
     /* ------------------------- obs RPC wrappers ------------------------- */
 
+    /// Validate the upcoming file *locally only*.
+    ///
+    /// This deliberately sends no obs-websocket request. The channel has a
+    /// single Media Source, and changing `local_file` during the lead-in makes
+    /// OBS re-open the decoder right away: the programme currently on air was
+    /// cut short 200ms early, and `cut_to` then opened the same decoder a
+    /// second time. `cut_to` is now the only place that re-points the source.
     async fn preload(&self, p: &ProgramEntry) -> anyhow::Result<()> {
         if !std::path::Path::new(&p.file_path).exists() {
             return Err(anyhow::anyhow!("file not found: {}", p.file_path));
         }
-        let settings = crate::interrupt::settings_payload(&p.file_path);
-        let client = self
-            .client()
-            .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
-        let target = self.target();
-        client.set_input_settings(&target, settings, true).await
+        Ok(())
     }
 
     /// Hard-cut to `p`.
@@ -1272,19 +1343,14 @@ impl Scheduler {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("no obs-websocket connection"))?;
-        // Stop the source *before* swapping the file. Changing `local_file`
-        // while it is still playing makes OBS reopen the asset and carry on
-        // playing it immediately, so by the time RESTART arrived the new
-        // programme had already run through the settle delay — every switch
-        // replayed its opening second. Stopping first makes RESTART the single
-        // start-of-playback event.
+        // Stop first so swapping `local_file` cannot make OBS auto-start the
+        // new clip (which would eat its opening frames before RESTART lands).
+        // Do not swallow this error: a failed Stop followed by a successful
+        // SetInputSettings used to leave the only source dark with no retry.
         let target = self.target();
-        let _ = client
+        client
             .trigger_media_input_action(&target, MediaInputAction::Stop)
-            .await;
-        // Always re-point the source at the file, even if the preload tick was
-        // missed (engine restart, lead-in shorter than the RPC round-trip):
-        // RESTART on its own would just replay whatever was configured before.
+            .await?;
         client
             .set_input_settings(
                 &target,
@@ -1292,28 +1358,17 @@ impl Scheduler {
                 true,
             )
             .await?;
-        // Wait until OBS has actually opened the file, then start it. A fixed
-        // 300ms sleep was guesswork: on a slow disk or a long-GOP file RESTART
-        // landed while the decoder was still opening — which showed up as a
-        // stutter right at the start of the next programme — while on a fast
-        // one it just wasted the interval with the source black.
+        // OBS applies SetInputSettings synchronously, so the decoder is already
+        // opening the new file when the request returns. The old loop waited
+        // for PLAYING/OPENING/BUFFERING — but we just sent STOP, so those
+        // states could never appear and *every single switch* burned the full
+        // 1500ms timeout with the channel black. Only wait for the file to be
+        // parsed, and cap the whole window at 250ms.
         let deadline = std::time::Instant::now() + Duration::from_millis(SWITCH_READY_TIMEOUT_MS);
         loop {
             match client.get_media_input_status(&target).await {
-                Ok(s) => {
-                    let state = s.media_state.to_ascii_uppercase();
-                    // `mediaDuration > 0` proves the decoder parsed the file;
-                    // the state check keeps us from being fooled by the
-                    // duration OBS still reports for the *previous* clip.
-                    let decoded = s.media_duration > 0.0;
-                    let live = state.contains("OPENING")
-                        || state.contains("BUFFERING")
-                        || state.contains("PLAYING")
-                        || state.contains("PAUSED");
-                    if decoded && live {
-                        break;
-                    }
-                }
+                Ok(s) if s.media_duration > 0.0 => break,
+                Ok(_) => {}
                 // Status query failed (old OBS, or the source vanished): don't
                 // spin, just start it and let the watchdog sort it out.
                 Err(_) => break,
@@ -1330,6 +1385,8 @@ impl Scheduler {
         client
             .trigger_media_input_action(&target, MediaInputAction::Restart)
             .await?;
+        // Invalidate any confirmation task belonging to an earlier cut.
+        CUT_GENERATION.fetch_add(1, Ordering::SeqCst);
         info!(
             "cut to '{}' on input '{}' ({}ms)",
             p.name, target, p.declared_duration_ms

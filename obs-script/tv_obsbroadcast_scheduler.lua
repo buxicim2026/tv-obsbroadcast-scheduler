@@ -169,15 +169,12 @@ end
 -- 先看看引擎是不是已经在跑（读文件，不起进程）；只有没在跑才拉起它。
 local function ensure_engine()
   if engine_alive() then return true end
+  -- OBS executes script callbacks on its UI/main thread. The old 4-second
+  -- busy-wait here (pure CPU spin) froze OBS on startup and on every button
+  -- press while the engine was starting — indistinguishable from an OBS hang.
+  -- Just launch the engine; the next tick / next button press reads
+  -- status.json, which the engine refreshes every 500ms.
   spawn_engine()
-  -- 轮询 status.json 而不是 HTTP：不起任何子进程。引擎正常时不到一秒就
-  -- 会写出 status.json；只有它起不来才会等满。
-  local deadline = os.clock() + 4
-  while os.clock() < deadline do
-    if engine_alive() then return true end
-    local until_ = os.clock() + 0.2
-    while os.clock() < until_ do end
-  end
   return engine_alive()
 end
 
@@ -198,7 +195,10 @@ local function ensure_token(settings)
     local chars = "0123456789abcdef"
     local parts = {}
     for i = 1, 32 do
-      parts[i] = chars:sub(math.random(1, 16), math.random(1, 16))
+      -- Two independent randoms could come back as (hi, lo) and make sub()
+      -- return an empty string, producing a truncated bootstrap token.
+      local k = math.random(1, 16)
+      parts[i] = chars:sub(k, k)
     end
     token = table.concat(parts)
     obs.obs_data_set_string(settings, "bootstrap_token", token)
@@ -212,8 +212,16 @@ end
 -- open_admin=true：顺便请引擎帮我们打开浏览器（自己起进程会闪命令行窗口）。
 local function build_payload(settings, apply_enabled, open_admin, force)
   local token = ensure_token(settings)
-  local enabled = (apply_enabled ~= false)
-    and obs.obs_data_get_bool(settings, "scheduler_enabled")
+  -- Only send `enabled` on an explicit request. The engine applies it whenever
+  -- `force` is set, and Test Connection uses force=true: writing `false` there
+  -- silently DISARMED a channel that was already on air.
+  local enabled
+  if apply_enabled ~= false then
+    enabled = obs.obs_data_get_bool(settings, "scheduler_enabled")
+      and "true" or "false"
+  else
+    enabled = "null"
+  end
 
   -- Blank fields are written as JSON `null` so the engine skips them. Writing
   -- "" instead made an empty box in the script properties overwrite whatever
@@ -236,7 +244,7 @@ local function build_payload(settings, apply_enabled, open_admin, force)
     json_escape(obs.obs_data_get_string(settings, "ws_password")),
     obs.obs_data_get_bool(settings, "ws_tls") and "true" or "false",
     opt_str(obs.obs_data_get_string(settings, "target_input")),
-    enabled and "true" or "false",
+    enabled,
     open_admin and "true" or "false",
     force and "true" or "false",
     os.time() * 1000
@@ -276,8 +284,10 @@ end
 
 function on_test_clicked(props, property)
   if not ensure_engine() then
-    obs.blog(obs.LOG_WARNING, LOG_TAG .. "engine could not be started")
-    return true
+    -- Not a failure: the engine was just spawned and needs a moment to write
+    -- status.json. Never block OBS's main thread waiting for it.
+    obs.blog(obs.LOG_INFO,
+      LOG_TAG .. "engine is starting; check the log again in a second")
   end
   -- force = true：操作员按了 Test Connection，就是要以脚本属性为准，
   -- 平时引擎以网页面板的设置为主（否则两边会互相覆盖）。

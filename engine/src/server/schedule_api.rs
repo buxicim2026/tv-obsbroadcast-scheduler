@@ -445,26 +445,37 @@ pub async fn upload_media(
     }
 
     let dir = media_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
+    let target = unique_path(dir.join(&file_name));
+    let path_str = target.display().to_string();
+    let size = body.len();
+    // The engine runs on two tokio worker threads. A synchronous write of a
+    // multi-hundred-MB file used to occupy one of them for seconds, starving
+    // both the 50ms scheduler tick and the obs-ws socket task — the broadcast
+    // froze for as long as the upload took.
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&target, &body)
+    })
+    .await
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("创建媒体目录失败: {e}"),
+            format!("写入文件任务失败: {e}"),
         )
-    })?;
-    let target = unique_path(dir.join(&file_name));
-    std::fs::write(&target, &body).map_err(|e| {
+    })?
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("写入文件失败: {e}"),
         )
     })?;
 
-    info!("stored uploaded media at {}", target.display());
+    info!("stored uploaded media at {}", path_str);
     Ok(Json(json!({
         "ok": true,
-        "path": target.display().to_string(),
+        "path": path_str,
         "name": file_name,
-        "size": body.len(),
+        "size": size,
     })))
 }
 

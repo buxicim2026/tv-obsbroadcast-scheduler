@@ -140,33 +140,39 @@ async fn main() -> Result<()> {
             loop {
                 if handle.current().is_some() {
                     // One-shot check as soon as we're on the air: does the
-                    // configured target source actually exist in OBS? A wrong
-                    // name is the classic "nothing plays, no explanation" —
-                    // and the operator shouldn't have to wait for a programme to
-                    // come due to find out.
-                    if let Some(client) = handle.current() {
-                        match client.get_input_list().await {
-                            Ok(list) => {
-                                let hit = list.iter().any(|i| i.input_name == target_input);
-                                if !hit {
-                                    let names: Vec<String> =
-                                        list.iter().map(|i| i.input_name.clone()).collect();
-                                    let msg = format!(
-                                        "受控媒体源「{}」在 OBS 里不存在，播出时不会有画面。\
-                                         请在设置页重新选择（OBS 现有来源：{}）",
-                                        target_input,
-                                        if names.is_empty() {
-                                            "（一个都没有）".to_string()
-                                        } else {
-                                            names.join("、")
-                                        }
-                                    );
-                                    warn!("{msg}");
-                                    state_for_tasks.status.write().last_error = Some(msg);
+                    // configured target source actually exist in OBS? Run it
+                    // in its own task. Awaiting it inline meant a slow (or
+                    // never-answered) GetInputList kept the scheduler below
+                    // from ever starting while the UI already said "connected".
+                    {
+                        let check_client = handle.current();
+                        let check_state = state_for_tasks.clone();
+                        let check_target = target_input.clone();
+                        tokio::spawn(async move {
+                            let Some(client) = check_client else { return };
+                            match client.get_input_list().await {
+                                Ok(list) => {
+                                    let hit = list.iter().any(|i| i.input_name == check_target);
+                                    if !hit {
+                                        let names: Vec<String> =
+                                            list.iter().map(|i| i.input_name.clone()).collect();
+                                        let msg = format!(
+                                            "受控媒体源「{}」在 OBS 里不存在，播出时不会有画面。\
+                                             请在设置页重新选择（OBS 现有来源：{}）",
+                                            check_target,
+                                            if names.is_empty() {
+                                                "（一个都没有）".to_string()
+                                            } else {
+                                                names.join("、")
+                                            }
+                                        );
+                                        warn!("{msg}");
+                                        check_state.status.write().last_error = Some(msg);
+                                    }
                                 }
+                                Err(e) => warn!("could not list OBS inputs at startup: {e:#}"),
                             }
-                            Err(e) => warn!("could not list OBS inputs at startup: {e:#}"),
-                        }
+                        });
                     }
                     // Pass the handle (not a client) so a later reconnect is
                     // picked up instead of sticking with a dead socket.
