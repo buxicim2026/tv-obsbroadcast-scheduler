@@ -23,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-2022]
+        # GitHub retired the macos-14 runner configuration ("... is not
+        # supported"); the rolling label stays on a supported arm64 image.
+        os: [ubuntu-22.04, macos-latest, windows-2022]
     steps:
       - uses: actions/checkout@v4
 

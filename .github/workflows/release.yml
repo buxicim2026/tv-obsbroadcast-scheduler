@@ -38,7 +38,7 @@ jobs:
           # free-tier queue is extremely long; re-added once GitHub's macOS
           # runner availability improves (tracked in README).
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             archive: macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-2022

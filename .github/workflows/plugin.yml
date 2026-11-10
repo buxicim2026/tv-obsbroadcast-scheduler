@@ -36,7 +36,7 @@ jobs:
           # Intel macOS (macos-13) is skipped: the free-tier runner queue is
           # hours deep. The Lua script itself is portable; only the engine
           # binary is arch-specific, so add macos-13 back when available.
-          - os: macos-14
+          - os: macos-latest
             archive: macos-arm64
     steps:
       - uses: actions/checkout@v4
