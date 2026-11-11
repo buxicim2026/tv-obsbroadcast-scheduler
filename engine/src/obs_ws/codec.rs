@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -36,14 +36,16 @@ use crate::config::ObsWsConfig;
 /// TLS for wss:// — the enum hides the difference).
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Max time an RPC may wait for its RequestResponse. OBS can stall while
-/// re-opening a decoder; without a deadline the scheduler tick (and therefore
-/// the whole broadcast) hangs forever on a half-open TCP connection.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-/// No Pong (and no other inbound frame) for this long => treat as dead.
-const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(15);
+/// Deadline for a single RPC round-trip. v0.0.3 used 3s AND dropped the whole
+/// socket on every timeout; with OBS busy decoding video that caused constant
+/// reconnects. A generous deadline still keeps the scheduler from hanging
+/// forever, without destabilising the connection.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Guards only the Hello/Identify message exchange. The TCP/WebSocket connect
+/// itself is deliberately NOT timed: obs-websocket can be slow to answer the
+/// HTTP upgrade while OBS is starting or busy, and v0.0.3's 5s cap turned that
+/// into a permanent "connect timed out" loop.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How a resolved response is handed back to its awaiting caller.
 enum Pending {
@@ -91,8 +93,6 @@ pub struct ObsWsClient {
     /// wakeup when the socket died between `handle.set()` and `closed().await`,
     /// which left the connector asleep forever with `obs_connected == true`.
     dead: Arc<AtomicBool>,
-    /// Lets a timed-out RPC tear the socket down and force a reconnect.
-    shutdown: Arc<Notify>,
 }
 
 impl ObsWsClient {
@@ -104,9 +104,8 @@ impl ObsWsClient {
             format!("ws://{}:{}/", cfg.host, cfg.port)
         };
 
-        let (mut ws, _resp) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_async(url.as_str()))
+        let (mut ws, _resp) = connect_async(url.as_str())
             .await
-            .map_err(|_| anyhow!("connect to obs websocket at {url} timed out"))?
             .with_context(|| format!("connect to obs websocket at {url}"))?;
 
         // Handshake: Hello (op 0) -> Identify (op 1) -> Identified (op 2).
@@ -132,14 +131,13 @@ impl ObsWsClient {
             next_id: Arc::new(Mutex::new(1)),
             closed: Arc::new(Notify::new()),
             dead: Arc::new(AtomicBool::new(false)),
-            shutdown: Arc::new(Notify::new()),
         });
         client.spawn(cmd_rx, ws);
         Ok(client)
     }
 
     /// Resolves once the background socket task has ended (OBS closed the
-    /// connection, a fatal protocol error, a timed-out RPC, or OBS restarted).
+    /// connection, a fatal protocol error, or OBS restarted).
     ///
     /// Registering `notified()` before checking the flag closes the race with
     /// the socket task: `notify_one()` stores a permit, and if the task already
@@ -152,12 +150,6 @@ impl ObsWsClient {
         notified.await;
     }
 
-    /// Force the socket task down. Called when an RPC times out: OBS answered
-    /// neither the request nor a Close frame, so waiting longer cannot help.
-    pub fn abort(&self) {
-        self.shutdown.notify_one();
-    }
-
     /// Wait for an RPC response, but never forever.
     async fn await_response<T>(
         &self,
@@ -168,11 +160,10 @@ impl ObsWsClient {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(anyhow!("{what} response dropped")),
             Err(_) => {
-                warn!(
-                    "{what} timed out after {:?}; dropping obs-websocket connection",
-                    RESPONSE_TIMEOUT
-                );
-                self.abort();
+                // Do NOT tear the socket down here. OBS may simply be busy
+                // decoding; v0.0.3 dropped the connection on every slow reply
+                // and produced a reconnect loop that took obs-websocket down.
+                warn!("{what} timed out after {:?}", RESPONSE_TIMEOUT);
                 Err(anyhow!("{what} timed out after {:?}", RESPONSE_TIMEOUT))
             }
         }
@@ -266,13 +257,8 @@ impl ObsWsClient {
         let pending_recv = pending.clone();
         let closed = self.closed.clone();
         let dead = self.dead.clone();
-        let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
-            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_rx = Instant::now();
-            let mut awaiting_pong = false;
             loop {
                 tokio::select! {
                     // Fair polling (no `biased`): while OBS keeps pushing event
@@ -280,8 +266,6 @@ impl ObsWsClient {
                     // ---- inbound frames -------------------------------------
                     incoming = ws.next() => {
                         let Some(frame) = incoming else { break };
-                        last_rx = Instant::now();
-                        awaiting_pong = false;
                         match frame {
                             Ok(Message::Text(txt)) => {
                                 let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue };
@@ -380,24 +364,11 @@ impl ObsWsClient {
                         }
                     }
 
-                    // ---- heartbeat -----------------------------------------
-                    // Only way to notice a half-open TCP connection: OBS is
-                    // gone but neither EOF nor an error ever arrives.
-                    _ = heartbeat.tick() => {
-                        if awaiting_pong && last_rx.elapsed() > HEARTBEAT_DEAD_AFTER {
-                            warn!("obs-websocket heartbeat timed out; reconnecting");
-                            break;
-                        }
-                        if last_rx.elapsed() >= HEARTBEAT_INTERVAL {
-                            if ws.send(Message::Ping(Default::default())).await.is_err() {
-                                break;
-                            }
-                            awaiting_pong = true;
-                        }
-                    }
-
-                    // ---- forced shutdown after an RPC timeout ---------------
-                    _ = shutdown.notified() => break,
+                    // No active Ping heartbeats: OBS's obs-websocket server
+                    // does not reliably answer them, and v0.0.3's 15s deadline
+                    // then killed otherwise healthy connections repeatedly.
+                    // Passive Pong replies (above) and the RPC watchdog are
+                    // enough; EOF/Close/error still trigger a normal reconnect.
                 }
             }
             // Socket/task ended. Fail every request still awaiting a reply,

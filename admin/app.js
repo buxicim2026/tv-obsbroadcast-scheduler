@@ -49,7 +49,7 @@ const PROGRAM_KIND_LABEL = Object.fromEntries(PROGRAM_KINDS);
 // 中文环境替换，英文环境的表现和以前完全一致。
 const APP_NAME_ZH = '电视塔';
 const APP_NAME_EN = 'tv-obsbroadcast-scheduler';
-const APP_VERSION = 'v0.0.3';
+const APP_VERSION = 'v0.0.4';
 
 function isChineseLocale() {
     const list = [navigator.language, ...(navigator.languages || [])].filter(Boolean);
